@@ -1,0 +1,1080 @@
+<!doctype html>
+<html lang="no">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Trafikken Widget</title>
+    <style>
+      :root {
+        --bg: #ffffff;
+        --text: #09090b;
+        --muted: #52525b;
+        --border: #e4e4e7;
+        --soft: #f4f4f5;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: #fafafa;
+        color: var(--text);
+        font: 14px/1.45 Inter, "Helvetica Neue", Helvetica, Arial, sans-serif;
+        padding: 12px;
+      }
+
+      .widget {
+        max-width: 980px;
+        margin: 0 auto;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        overflow: hidden;
+        background: var(--bg);
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+      }
+
+      .header {
+        padding: 12px;
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+
+      .title {
+        margin: 0;
+        font-size: 16px;
+        font-weight: 700;
+      }
+
+      .subtitle {
+        margin: 4px 0 0;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      .actions {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+
+      .tabs {
+        display: inline-flex;
+        background: var(--soft);
+        border-radius: 6px;
+        padding: 3px;
+      }
+
+      .tab {
+        border: 0;
+        background: transparent;
+        border-radius: 6px;
+        padding: 6px 12px;
+        font-size: 12px;
+        cursor: pointer;
+        color: #3f3f46;
+        font-weight: 600;
+        transition: background 120ms ease, box-shadow 120ms ease, color 120ms ease;
+        outline: none;
+      }
+
+      .tab.active {
+        background: #fff;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.09);
+        color: #09090b;
+        border: 1px solid var(--border);
+      }
+
+      .btn {
+        border: 1px solid var(--border);
+        background: #fff;
+        border-radius: 6px;
+        padding: 6px 10px;
+        font-size: 12px;
+        cursor: pointer;
+      }
+
+      .icon-btn {
+        width: 36px;
+        height: 36px;
+        padding: 0;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+      }
+
+      /* Widget updates automatically; hide manual refresh control. */
+      .actions #refresh {
+        display: none !important;
+      }
+
+      .hidden {
+        display: none;
+      }
+
+      .spinner {
+        width: 16px;
+        height: 16px;
+        animation: spin 700ms linear infinite;
+      }
+
+      @keyframes updatedRowFade {
+        from {
+          background-color: rgba(254, 243, 199, 1); /* amber-100 */
+        }
+        to {
+          background-color: transparent;
+        }
+      }
+
+      .updated-row {
+        animation: updatedRowFade 1200ms ease-out;
+      }
+
+      .tab,
+      .btn {
+        transition: transform 120ms ease;
+      }
+
+      .tab:active,
+      .btn:active {
+        transform: scale(0.98);
+      }
+
+      @keyframes spin {
+        from {
+          transform: rotate(0deg);
+        }
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      .content {
+        padding: 4px 12px 12px;
+      }
+
+      .error {
+        display: none;
+        margin-bottom: 10px;
+        border: 1px solid #fecaca;
+        background: #fef2f2;
+        color: #991b1b;
+        border-radius: 6px;
+        padding: 10px;
+        font-size: 12px;
+      }
+
+      .table-wrap {
+        display: none;
+        overflow-x: auto;
+      }
+
+      .expand-wrap {
+        display: none;
+        margin-top: 0;
+      }
+
+      .expand-wrap.show {
+        display: block;
+      }
+
+      /* Samme full bredde som pil-rad øverst; skillelinje mot listen over */
+      .expand-bar {
+        margin-left: -12px;
+        margin-right: -12px;
+        width: calc(100% + 24px);
+        box-sizing: border-box;
+        border-top: 1px solid #f4f4f5;
+        background: rgba(250, 250, 250, 0.45);
+        padding: 0;
+      }
+
+      .mobile-list {
+        display: flex;
+        flex-direction: column;
+      }
+
+      .mobile-row {
+        padding: 10px 12px;
+        border-bottom: 1px solid #e4e4e7;
+        display: grid;
+        grid-template-columns: 70px 1fr auto;
+        align-items: start;
+        gap: 10px;
+      }
+
+      .mobile-time {
+        font-weight: 800;
+        font-size: 14px;
+        line-height: 1.1;
+      }
+
+      .mobile-dest {
+        margin-top: 2px;
+        font-weight: 800;
+        font-size: 14px;
+        line-height: 1.1;
+      }
+
+      .mobile-flight {
+        margin-top: 3px;
+        font-size: 12px;
+        font-weight: 600;
+        color: #374151;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .mobile-sub {
+        margin-top: 4px;
+        font-size: 12px;
+        font-weight: 700;
+        color: #111827;
+      }
+
+      .mobile-right {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        text-align: right;
+      }
+
+      .mobile-sub--no-status {
+        margin-top: 20px;
+      }
+
+      /* Used together with .chip (background/border colors) */
+      .chip.mobile-chip {
+        border-radius: 6px !important;
+        padding: 5px 8px;
+        font-size: 11px;
+      }
+
+      .tomorrow-label,
+      .yesterday-label {
+        font-size: 10px;
+        font-weight: 700;
+        color: #6b7280;
+        margin-top: 2px;
+        line-height: 1.1;
+      }
+
+      /* Full bredde i kortet: nullstill .content sin horisontale padding */
+      .earlier-bar {
+        margin-left: -12px;
+        margin-right: -12px;
+        width: calc(100% + 24px);
+        box-sizing: border-box;
+        border-bottom: 1px solid #f4f4f5;
+        background: rgba(250, 250, 250, 0.45);
+        padding: 0;
+      }
+
+      .earlier-load-btn {
+        display: flex;
+        width: 100%;
+        height: 20px;
+        min-height: 0;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        border: 0;
+        border-radius: 0;
+        background: transparent;
+        color: #a1a1aa;
+        cursor: pointer;
+        padding: 0;
+        transition:
+          background 120ms ease,
+          border-color 120ms ease,
+          color 120ms ease,
+          transform 120ms ease;
+      }
+
+      .earlier-load-btn:hover {
+        background: rgba(244, 244, 245, 0.9);
+        color: #52525b;
+      }
+
+      .earlier-load-btn:active {
+        transform: scale(0.99);
+      }
+
+      .earlier-load-btn svg {
+        width: 12px;
+        height: 12px;
+        flex-shrink: 0;
+      }
+
+      .earlier-later-label {
+        font-size: 10px;
+        font-weight: 500;
+        line-height: 1;
+        letter-spacing: 0.01em;
+      }
+
+      .earlier-row td {
+        padding: 0 !important;
+        border-bottom: 1px solid #f4f4f5;
+        background: transparent;
+        vertical-align: middle;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        min-width: 760px;
+      }
+
+      th,
+      td {
+        text-align: left;
+        padding: 10px 8px;
+        border-bottom: 1px solid #f0f0f0;
+        vertical-align: middle;
+      }
+
+      th {
+        color: var(--muted);
+        font-size: 11px;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        font-weight: 600;
+      }
+
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        border: 1px solid;
+        border-radius: 6px;
+        padding: 4px 8px;
+        font-size: 11px;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+
+      .chip.default {
+        background: #f8fafc;
+        color: #334155;
+        border-color: #e2e8f0;
+      }
+      .chip.ok {
+        background: #e0f2fe;
+        color: #0369a1;
+        border-color: #bae6fd;
+      }
+      .chip.warn {
+        background: #fffbeb;
+        color: #92400e;
+        border-color: #fde68a;
+      }
+      .chip.bad {
+        background: #fef2f2;
+        color: #b91c1c;
+        border-color: #fecaca;
+      }
+
+      .footer {
+        margin-top: 10px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+
+      a {
+        color: inherit;
+      }
+
+      @media (max-width: 768px) {
+        body {
+          padding: 12px;
+        }
+
+        .table-wrap {
+          display: none;
+        }
+
+        .mobile-list {
+          display: flex;
+          flex-direction: column;
+        }
+
+        .expand-wrap {
+          margin-top: 0;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <section class="widget">
+      <div class="header">
+        <div>
+          <h1 class="title" id="airportTitle">Stavanger Lufthavn Sola (SVG)</h1>
+          <p class="subtitle" id="meta">Laster...</p>
+        </div>
+        <div class="actions">
+          <div class="tabs">
+            <button class="tab active" data-dir="D" id="tab-dep">Avganger</button>
+            <button class="tab" data-dir="A" id="tab-arr">Ankomster</button>
+          </div>
+          <div class="tabs" aria-label="Flyplass">
+            <button class="tab active" type="button" data-airport="SVG" id="tab-airport-svg">SVG</button>
+            <button class="tab" type="button" data-airport="BGO" id="tab-airport-bgo">BGO</button>
+            <button class="tab" type="button" data-airport="OSL" id="tab-airport-osl">OSL</button>
+            <button class="tab" type="button" data-airport="TRD" id="tab-airport-trd">TRD</button>
+          </div>
+          <button class="btn icon-btn" id="refresh" aria-label="Oppdater flystatus" title="Oppdater">
+            <svg id="refreshIcon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12a9 9 0 0 1-9 9 9 9 0 0 1-6.364-2.636" />
+              <path d="M3 12a9 9 0 0 1 9-9 9 9 0 0 1 6.364 2.636" />
+              <path d="M21 3v6h-6" />
+              <path d="M3 21v-6h6" />
+            </svg>
+            <svg id="refreshSpinner" class="spinner hidden" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="content">
+        <div class="error" id="error"></div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Tid</th>
+                <th id="to-from-label">Til</th>
+                <th>Fly</th>
+                <th>Status</th>
+                <th>Gate</th>
+                <th>Bånd</th>
+              </tr>
+            </thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+        <div class="mobile-list" id="mobileList"></div>
+        <div class="expand-wrap" id="expandWrap">
+          <div class="expand-bar">
+            <button class="earlier-load-btn" type="button" id="expandBtn" aria-label="Vis flere fly i listen (senere)"></button>
+          </div>
+        </div>
+        <div class="footer">Flydata fra <a href="https://www.avinor.no" target="_blank" rel="noreferrer">Avinor</a>.</div>
+      </div>
+    </section>
+
+    <script>
+      (function () {
+        var direction = "D";
+        var airport = "SVG";
+        var airportLabels = {
+          SVG: "Stavanger Lufthavn Sola (SVG)",
+          BGO: "Bergen lufthavn Flesland (BGO)",
+          OSL: "Oslo Lufthavn Gardermoen (OSL)",
+          TRD: "Trondheim lufthavn Vaernes (TRD)",
+        };
+        var maxLines = 15;
+        var initialEarlierCount = 5;
+        var initialPendingCount = 10;
+        /** Vis resten av listen (kun én vei). */
+        var showLaterRows = false;
+        var currentFlights = [];
+        /** Utvidet tidsvindu bakover (Avinor TimeFrom: 24 t vs 1 t). */
+        var showEarlier = false;
+
+        var prevSignatureByUid = {};
+        function flightSignature(f) {
+          return (
+            (f.statusCode || "") +
+            "|" +
+            (f.statusTextNo || "") +
+            "|" +
+            (f.statusTimeUtc || "") +
+            "|" +
+            (f.gate || "") +
+            "|" +
+            (f.beltNumber || "") +
+            "|" +
+            (f.airportName || f.airport || "") +
+            "|" +
+            (f.airlineName || f.airline || "")
+          );
+        }
+
+        var ymdFormatter = new Intl.DateTimeFormat("en-CA", {
+          timeZone: "Europe/Oslo",
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+        });
+
+        function localYmd(date) {
+          return ymdFormatter.format(date);
+        }
+
+        var nowKey = localYmd(new Date());
+        var parts = nowKey.split("-");
+        var nowY = Number(parts[0]);
+        var nowM = Number(parts[1]);
+        var nowD = Number(parts[2]);
+        var yesterdayKey = localYmd(new Date(Date.UTC(nowY, nowM - 1, nowD - 1, 12, 0, 0)));
+        var tomorrowKey = localYmd(new Date(Date.UTC(nowY, nowM - 1, nowD + 1, 12, 0, 0)));
+
+        function scheduleRelativeDayHtml(scheduleIso) {
+          var d = new Date(scheduleIso);
+          if (Number.isNaN(d.getTime())) return "";
+          var key = localYmd(d);
+          if (key === yesterdayKey) return '<div class="yesterday-label">i går</div>';
+          if (key === tomorrowKey) return '<div class="tomorrow-label">i morgen</div>';
+          return "";
+        }
+
+        var rowsEl = document.getElementById("rows");
+        var metaEl = document.getElementById("meta");
+        var errorEl = document.getElementById("error");
+        var toFromEl = document.getElementById("to-from-label");
+        var airportTitleEl = document.getElementById("airportTitle");
+        var tabs = [document.getElementById("tab-dep"), document.getElementById("tab-arr")];
+        var airportBtns = [
+          document.getElementById("tab-airport-svg"),
+          document.getElementById("tab-airport-bgo"),
+          document.getElementById("tab-airport-osl"),
+          document.getElementById("tab-airport-trd"),
+        ];
+        var mobileListEl = document.getElementById("mobileList");
+        var expandWrap = document.getElementById("expandWrap");
+        var expandBtn = document.getElementById("expandBtn");
+
+        var refreshBtn = document.getElementById("refresh");
+        var refreshIconEl = document.getElementById("refreshIcon");
+        var refreshSpinnerEl = document.getElementById("refreshSpinner");
+
+        function setRefreshing(isRefreshing) {
+          if (!refreshBtn) return;
+          refreshBtn.disabled = isRefreshing;
+
+          if (isRefreshing) {
+            if (refreshIconEl) refreshIconEl.classList.add("hidden");
+            if (refreshSpinnerEl) refreshSpinnerEl.classList.remove("hidden");
+            metaEl.textContent = "Flystatus. Oppdaterer…";
+          } else {
+            if (refreshIconEl) refreshIconEl.classList.remove("hidden");
+            if (refreshSpinnerEl) refreshSpinnerEl.classList.add("hidden");
+          }
+        }
+
+        function updateExpandButton(totalFlights, shownFlights) {
+          if (!expandWrap || !expandBtn) return;
+          var shown = typeof shownFlights === "number" ? shownFlights : maxLines;
+
+          if (totalFlights > shown && !showLaterRows) {
+            expandWrap.classList.add("show");
+            var more = totalFlights - shown;
+            expandBtn.setAttribute("aria-label", "Vis " + more + " flere fly i listen (senere)");
+            expandBtn.innerHTML =
+              '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg><span class="earlier-later-label">senere</span>';
+          } else {
+            expandWrap.classList.remove("show");
+          }
+        }
+
+        function setAirportTabs() {
+          if (airportTitleEl && airportLabels[airport]) {
+            airportTitleEl.textContent = airportLabels[airport];
+          }
+          airportBtns.forEach(function (btn) {
+            if (!btn) return;
+            if (btn.dataset.airport === airport) btn.classList.add("active");
+            else btn.classList.remove("active");
+          });
+        }
+
+        function fmtTime(isoUtc) {
+          if (!isoUtc) return "";
+          var d = new Date(isoUtc);
+          if (Number.isNaN(d.getTime())) return "";
+          return new Intl.DateTimeFormat("nb-NO", {
+            timeZone: "Europe/Oslo",
+            hour: "2-digit",
+            minute: "2-digit",
+          }).format(d);
+        }
+
+        function statusLabel(code) {
+          if (!code) return "Scheduled";
+          if (code === "A") return "Ankommet";
+          if (code === "C") return "Kansellert";
+          if (code === "D") return "Avgått";
+          if (code === "E") return "Ny tid";
+          if (code === "N") return "Ny info";
+          return code;
+        }
+
+        function statusClass(code) {
+          if (code === "C") return "bad";
+          if (code === "D" || code === "A") return "ok";
+          if (code === "E" || code === "N") return "warn";
+          return "default";
+        }
+
+        function getEffectiveStatus(flight) {
+          if (flight.statusCode === "E" && flight.statusTimeUtc && flight.scheduleTimeUtc) {
+            var oldMs = Date.parse(flight.scheduleTimeUtc);
+            var newMs = Date.parse(flight.statusTimeUtc);
+            var deviationMs = Math.abs(newMs - oldMs);
+            var deviationOk = deviationMs > 15 * 60 * 1000; // > 15 minutes
+            var newInFuture = newMs > Date.now();
+
+            if (Number.isFinite(oldMs) && Number.isFinite(newMs) && deviationOk && newInFuture) {
+              return { code: "E", label: "Ny tid", time: "" };
+            }
+          }
+
+          if (flight.statusTextNo) {
+            return { code: flight.statusCode || "", label: flight.statusTextNo, time: flight.statusTimeUtc || "" };
+          }
+
+          return {
+            code: flight.statusCode || "",
+            label: statusLabel(flight.statusCode),
+            time: flight.statusTimeUtc || "",
+          };
+        }
+
+        function earlierLoadButtonHtml() {
+          var label = direction === "D" ? "Last inn tidligere avganger" : "Last inn tidligere ankomster";
+          var title = direction === "D" ? "Vis tidligere avganger" : "Vis tidligere ankomster";
+          return (
+            '<button type="button" class="earlier-load-btn" aria-label="' +
+            label +
+            '" title="' +
+            title +
+            '">' +
+            '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+            '<path d="M18 15l-6-6-6 6"/>' +
+            '</svg><span class="earlier-later-label">tidligere</span></button>'
+          );
+        }
+
+        function earlierTableRowHtml() {
+          if (showEarlier) return "";
+          return (
+            '<tr class="earlier-row"><td colspan="6">' +
+            '<div class="earlier-bar">' +
+            earlierLoadButtonHtml() +
+            "</div></td></tr>"
+          );
+        }
+
+        function earlierMobileBarHtml() {
+          if (showEarlier) return "";
+          return '<div class="earlier-bar">' + earlierLoadButtonHtml() + "</div>";
+        }
+
+        function renderRows(flights, highlightUids) {
+          if (!highlightUids) highlightUids = {};
+          if (!flights || flights.length === 0) {
+            var emptyTable = '<tr><td colspan="6" style="color:#52525b;">Ingen fly i dette tidsrommet.</td></tr>';
+            var emptyMobile = '<div style="color:#52525b; padding: 12px 14px;">Ingen fly i dette tidsrommet.</div>';
+            rowsEl.innerHTML = earlierTableRowHtml() + emptyTable;
+            if (mobileListEl) {
+              mobileListEl.innerHTML = earlierMobileBarHtml() + emptyMobile;
+            }
+            updateExpandButton(0, 0);
+            return;
+          }
+
+          var toFromLabel = direction === "D" ? "Til" : "Fra";
+
+          var limited = flights
+            .slice()
+            .sort(function (a, b) {
+              return (a.scheduleTimeUtc || "").localeCompare(b.scheduleTimeUtc || "");
+            });
+
+          var visible;
+          if (showLaterRows) {
+            visible = limited;
+          } else {
+            var nowMs = Date.now();
+            var completedCode = direction === "D" ? "D" : "A";
+            var earlierCompleted = limited
+              .filter(function (f) {
+                var t = Date.parse(f.scheduleTimeUtc || "");
+                return Number.isFinite(t) && t < nowMs && f.statusCode === completedCode;
+              })
+              .slice(-initialEarlierCount);
+            var pending = limited
+              .filter(function (f) {
+                return f.statusCode !== completedCode;
+              })
+              .slice(0, initialPendingCount);
+            var picked = earlierCompleted.concat(pending);
+            if (!picked.length) {
+              visible = limited.slice(0, maxLines);
+            } else {
+              var seen = {};
+              var unique = [];
+              picked.forEach(function (f) {
+                var id = f.uniqueId || "";
+                if (!id || seen[id]) return;
+                seen[id] = true;
+                unique.push(f);
+              });
+              visible = unique.sort(function (a, b) {
+                return (a.scheduleTimeUtc || "").localeCompare(b.scheduleTimeUtc || "");
+              });
+            }
+          }
+
+          updateExpandButton(limited.length, visible.length);
+
+          var html = visible.map(function (f) {
+            var status = getEffectiveStatus(f);
+            return (
+              "<tr" +
+              (highlightUids && highlightUids[f.uniqueId] ? ' class="updated-row"' : "") +
+              ">" +
+              '<td data-label="Time"><strong>' +
+              (f.statusTimeUtc && f.statusTimeUtc !== f.scheduleTimeUtc
+                ? '<span style="text-decoration: line-through; opacity: 0.65;">' +
+                  fmtTime(f.scheduleTimeUtc) +
+                  "</span><br />" +
+                  fmtTime(f.statusTimeUtc)
+                : fmtTime(f.scheduleTimeUtc)) +
+              "</strong>" +
+              scheduleRelativeDayHtml(f.scheduleTimeUtc) +
+              "</td>" +
+              '<td data-label="' +
+              toFromLabel +
+              '">' +
+              ((f.airportName || f.airport) || "") +
+              "</td>" +
+              '<td data-label="Flight">' +
+              (f.flightId || "") +
+              '<span style="margin: 0 6px; color:#64748b;">|</span>' +
+              ((f.airlineName || f.airline) || "") +
+              "</td>" +
+              '<td data-label="Status">' +
+              (status.label !== "Scheduled"
+                ? '<span class="chip ' + statusClass(status.code) + '">' + status.label + "</span>"
+                : "") +
+              "</td>" +
+              '<td data-label="Gate">' +
+              (f.gate && f.gate !== "—" ? f.gate : "") +
+              "</td>" +
+              '<td data-label="Belt">' +
+              (f.beltNumber && f.beltNumber !== "—" ? f.beltNumber : "") +
+              "</td>" +
+              "</tr>"
+            );
+          }).join("");
+
+          rowsEl.innerHTML = earlierTableRowHtml() + html;
+
+          if (mobileListEl) {
+            var mobileHtml = visible
+              .map(function (f) {
+                var status = getEffectiveStatus(f);
+                var mobileStatusLabel = status.label;
+                // Keep Avinor's label (e.g. Departed, Cancelled, etc.).
+
+                var gateOrBeltValue = direction === "D" ? f.gate || "" : f.beltNumber || "";
+                var gateOrBeltText = "";
+                if (gateOrBeltValue && gateOrBeltValue !== "—") {
+                  gateOrBeltText = direction === "D" ? "Gate " + gateOrBeltValue : "Bånd " + gateOrBeltValue;
+                }
+
+                var placeName = f.airportName || f.airport || "";
+                var airlineName = f.airlineName || f.airline || "";
+                var flightLine = (f.flightId || "") + " | " + airlineName + (gateOrBeltText ? " | " + gateOrBeltText : "");
+
+                var scheduleLocal = fmtTime(f.scheduleTimeUtc);
+                var timeChanged = f.statusTimeUtc && f.statusTimeUtc !== f.scheduleTimeUtc;
+                var newLocal = timeChanged ? fmtTime(f.statusTimeUtc) : "";
+                var timeHtml = timeChanged
+                  ? '<span style="text-decoration: line-through; opacity: 0.65;">' +
+                    scheduleLocal +
+                    "</span><br />" +
+                    newLocal
+                  : scheduleLocal;
+
+                return (
+                  '<div class="mobile-row' +
+                  (highlightUids && highlightUids[f.uniqueId] ? " updated-row" : "") +
+                  '">' +
+                  '<div class="mobile-time">' +
+                  timeHtml +
+                  scheduleRelativeDayHtml(f.scheduleTimeUtc) +
+                  "</div>" +
+                  '<div style="min-width: 0;">' +
+                  '<div class="mobile-dest">' +
+                  placeName +
+                  "</div>" +
+                  '<div class="mobile-flight">' +
+                  flightLine +
+                  "</div>" +
+                  "</div>" +
+                  '<div class="mobile-right">' +
+                  (mobileStatusLabel !== "Scheduled"
+                    ? '<span class="chip mobile-chip ' +
+                      statusClass(status.code) +
+                      '">' +
+                      mobileStatusLabel +
+                      "</span>"
+                    : "") +
+                  "" +
+                  "</div>" +
+                  "</div>"
+                );
+              })
+              .join("");
+
+            mobileListEl.innerHTML = earlierMobileBarHtml() + mobileHtml;
+          }
+        }
+
+        function setTabs() {
+          tabs.forEach(function (el) {
+            if (!el) return;
+            if (el.dataset.dir === direction) el.classList.add("active");
+            else el.classList.remove("active");
+          });
+          toFromEl.textContent = direction === "D" ? "Til" : "Fra";
+        }
+
+        function showError(userMessage, technicalMessage) {
+          errorEl.style.display = "block";
+          errorEl.innerHTML = "";
+
+          var msgEl = document.createElement("div");
+          msgEl.textContent = userMessage;
+          errorEl.appendChild(msgEl);
+
+          if (technicalMessage) {
+            var btnEl = document.createElement("button");
+            btnEl.type = "button";
+            btnEl.textContent = "Vis detaljer";
+            btnEl.style.marginTop = "8px";
+            btnEl.style.padding = "6px 10px";
+            btnEl.style.borderRadius = "6px";
+            btnEl.style.border = "1px solid var(--border)";
+            btnEl.style.background = "rgba(255,255,255,0.7)";
+            btnEl.style.color = "inherit";
+            btnEl.style.cursor = "pointer";
+
+            var detailsEl = document.createElement("pre");
+            detailsEl.className = "hidden";
+            detailsEl.style.marginTop = "8px";
+            detailsEl.style.padding = "10px";
+            detailsEl.style.background = "rgba(255,255,255,0.8)";
+            detailsEl.style.borderRadius = "10px";
+            detailsEl.style.fontSize = "11px";
+            detailsEl.style.whiteSpace = "pre-wrap";
+            detailsEl.textContent = technicalMessage;
+
+            btnEl.addEventListener("click", function () {
+              var isHidden = detailsEl.classList.contains("hidden");
+              if (isHidden) detailsEl.classList.remove("hidden");
+              else detailsEl.classList.add("hidden");
+              btnEl.textContent = isHidden ? "Skjul detaljer" : "Vis detaljer";
+            });
+
+            errorEl.appendChild(btnEl);
+            errorEl.appendChild(detailsEl);
+          }
+        }
+
+        function clearError() {
+          errorEl.style.display = "none";
+          errorEl.innerHTML = "";
+        }
+
+        function sleep(ms) {
+          return new Promise(function (resolve) {
+            setTimeout(resolve, ms);
+          });
+        }
+
+        var MAX_FETCH_ATTEMPTS = 3;
+        var RETRY_DELAYS_MS = [450, 900];
+
+        function fetchFlightsWithRetry() {
+          function attempt(n) {
+            var controller = new AbortController();
+            var timeoutId = setTimeout(function () {
+              controller.abort();
+            }, 8000);
+            var timeFrom = showEarlier ? 24 : 1;
+            return fetch(
+              "/api/flights?airport=" +
+                airport +
+                "&direction=" +
+                direction +
+                "&timeFrom=" +
+                timeFrom +
+                "&timeTo=24&cacheBust=" +
+                Date.now(),
+              { cache: "no-store", signal: controller.signal },
+            )
+              .then(function (res) {
+                clearTimeout(timeoutId);
+                return res.json().then(
+                  function (json) {
+                    if (!res.ok) {
+                      throw new Error(json && json.error ? json.error : "Request failed (" + res.status + ")");
+                    }
+                    return json;
+                  },
+                  function () {
+                    if (!res.ok) throw new Error("Request failed (" + res.status + ")");
+                    throw new Error("INVALID_JSON");
+                  },
+                );
+              })
+              .catch(function (err) {
+                clearTimeout(timeoutId);
+                if (n >= MAX_FETCH_ATTEMPTS - 1) throw err;
+                var wait = RETRY_DELAYS_MS[n] != null ? RETRY_DELAYS_MS[n] : 600;
+                return sleep(wait).then(function () {
+                  return attempt(n + 1);
+                });
+              });
+          }
+          return attempt(0);
+        }
+
+        function load(showLoadingUi) {
+          if (showLoadingUi === undefined) showLoadingUi = true;
+          if (showLoadingUi) showLaterRows = false;
+
+          if (showLoadingUi) {
+            currentFlights = [];
+            rowsEl.innerHTML =
+              '<tr><td colspan="6" style="color:#52525b;">' +
+              '<span style="display:inline-flex;align-items:center;gap:8px;">' +
+              '<svg class="spinner" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+              '<path d="M21 12a9 9 0 1 1-6.219-8.56" />' +
+              "</svg>" +
+              "Laster..." +
+              "</span>" +
+              "</td></tr>";
+            if (mobileListEl) {
+              mobileListEl.innerHTML =
+                '<div style="color:#52525b; padding: 12px 14px;">' +
+                '<span style="display:inline-flex;align-items:center;gap:8px;">' +
+                '<svg class="spinner" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+                '<path d="M21 12a9 9 0 1 1-6.219-8.56" />' +
+                "</svg>" +
+                "Laster…" +
+                "</span>" +
+                "</div>";
+            }
+          }
+          clearError();
+          setTabs();
+          setAirportTabs();
+          setRefreshing(true);
+
+          fetchFlightsWithRetry()
+            .then(function (data) {
+              var updateText = data.lastUpdateUtc
+                ? "Sist oppdatert: " + fmtTime(data.lastUpdateUtc) + " (Europe/Oslo)"
+                : "Oppdatert live";
+              metaEl.textContent = "Flystatus. " + updateText + ".";
+              var nextFlights = data.flights || [];
+              var highlightUids = {};
+
+              if (!showLoadingUi) {
+                nextFlights.forEach(function (f) {
+                  var uid = f.uniqueId;
+                  var sig = flightSignature(f);
+                  if (prevSignatureByUid[uid] && prevSignatureByUid[uid] !== sig) highlightUids[uid] = true;
+                });
+              }
+
+              nextFlights.forEach(function (f) {
+                prevSignatureByUid[f.uniqueId] = flightSignature(f);
+              });
+
+              currentFlights = nextFlights;
+              renderRows(currentFlights, highlightUids);
+            })
+            .catch(function (err) {
+              if (showLoadingUi) {
+                rowsEl.innerHTML = '<tr><td colspan="6" style="color:#52525b;">Ingen data tilgjengelig.</td></tr>';
+                if (mobileListEl) {
+                  mobileListEl.innerHTML =
+                    '<div style="color:#52525b; padding: 12px 14px;">Ingen data tilgjengelig.</div>';
+                }
+                updateExpandButton(0);
+              }
+              showError(
+                "Kunne ikke hente flystatus akkurat nå. Prøv igjen om et øyeblikk.",
+                err && err.message ? err.message : "Ukjent feil",
+              );
+              metaEl.textContent = "Flystatus.";
+            })
+            .finally(function () {
+              setRefreshing(false);
+            });
+        }
+
+        tabs.forEach(function (btn) {
+          if (!btn) return;
+          btn.addEventListener("click", function () {
+            direction = btn.dataset.dir || "D";
+            showEarlier = false;
+            showLaterRows = false;
+            load(true);
+          });
+        });
+
+        var contentEl = document.querySelector(".content");
+        if (contentEl) {
+          contentEl.addEventListener("click", function (e) {
+            if (!e.target.closest(".earlier-bar .earlier-load-btn")) return;
+            showEarlier = true;
+            showLaterRows = false;
+            load(true);
+          });
+        }
+
+        if (airportBtns && airportBtns.length) {
+          airportBtns.forEach(function (btn) {
+            if (!btn) return;
+            btn.addEventListener("click", function () {
+              airport = btn.dataset.airport || "SVG";
+              showEarlier = false;
+              showLaterRows = false;
+              load(true);
+            });
+          });
+        }
+
+        if (expandBtn) {
+          expandBtn.addEventListener("click", function () {
+            showLaterRows = true;
+            renderRows(currentFlights, {});
+          });
+        }
+
+        document.getElementById("refresh").addEventListener("click", function () {
+          load(true);
+        });
+        setInterval(function () {
+          load(false);
+        }, 60000);
+        load(true);
+      })();
+    </script>
+  </body>
+</html>

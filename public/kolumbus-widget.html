@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="no">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Kolumbus driftsmeldinger</title>
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"
+      integrity="sha512-Evv84Mr4kqVGRNSgIGL/F/aIDqQb7xQ2vcrdIwxfjThSH8CSR7PBEakCr51Ck+w+/U6swU2Im1vVX0SVk9ABhg=="
+      crossorigin="anonymous"
+      referrerpolicy="no-referrer"
+    />
+    <style>
+      :root {
+        --bg: #ffffff;
+        --text: #09090b;
+        --muted: #52525b;
+        --border: #e4e4e7;
+        --soft: #f4f4f5;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: #fafafa;
+        color: var(--text);
+        font: 14px/1.45 Inter, "Helvetica Neue", Helvetica, Arial, sans-serif;
+        padding: 12px;
+      }
+      .widget {
+        max-width: 980px;
+        margin: 0 auto;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        overflow: hidden;
+        background: var(--bg);
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+      }
+      .header {
+        padding: 12px;
+        border-bottom: 1px solid var(--border);
+      }
+      .title {
+        margin: 0;
+        font-size: 16px;
+        font-weight: 700;
+      }
+      .subtitle {
+        margin: 4px 0 0;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .content { padding: 12px; }
+      .box {
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: var(--soft);
+        color: var(--muted);
+        padding: 10px;
+        font-size: 12px;
+      }
+      .error {
+        border-color: #fecaca;
+        background: #fef2f2;
+        color: #991b1b;
+      }
+      .list { display: flex; flex-direction: column; }
+      .item {
+        display: block;
+        text-decoration: none;
+        color: inherit;
+        padding: 10px 8px;
+        border-bottom: 1px solid var(--border);
+      }
+      .item:last-child { border-bottom: 0; }
+      .item:hover { background: #fafafa; }
+      .item-date { font-size: 11px; font-weight: 700; color: #71717a; }
+      .item-date-wrap {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .item-icon {
+        font-size: 15px;
+        color: #1e3a8a;
+        flex: 0 0 auto;
+      }
+      .item-title { font-size: 14px; font-weight: 700; color: #111827; }
+      .item-excerpt { margin-top: 3px; font-size: 12px; color: #52525b; }
+      .item-meta { font-size: 12px; color: #52525b; }
+      .item-grid {
+        margin-top: 8px;
+        display: grid;
+        gap: 8px;
+      }
+      .item-label {
+        font-weight: 700;
+        color: #374151;
+        font-size: 12px;
+      }
+      .item-list {
+        margin: 4px 0 0 18px;
+        padding: 0;
+        font-size: 12px;
+        color: #52525b;
+      }
+      .item-tags {
+        margin-top: 8px;
+        font-size: 11px;
+        color: #52525b;
+      }
+      .info-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 24px;
+        height: 24px;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: #fff;
+        color: #3f3f46;
+        font-size: 11px;
+        font-weight: 700;
+      }
+      .raw-title {
+        margin-top: 8px;
+        font-size: 11px;
+        font-weight: 700;
+        color: #3f3f46;
+      }
+      .raw-pre {
+        margin-top: 4px;
+        max-height: 180px;
+        overflow: auto;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        background: #f8fafc;
+        padding: 8px;
+        font-size: 10px;
+        color: #52525b;
+        white-space: pre-wrap;
+      }
+      .footer {
+        margin-top: 10px;
+        color: var(--muted);
+        font-size: 11px;
+      }
+      a { color: inherit; }
+    </style>
+  </head>
+  <body>
+    <section class="widget" aria-label="Kolumbus driftsmeldinger">
+      <header class="header">
+        <h1 class="title">Kolumbus driftsmeldinger</h1>
+        <p class="subtitle" id="meta">Laster…</p>
+      </header>
+      <div class="content">
+        <div id="state" class="box">Laster driftsmeldinger…</div>
+        <div id="list" class="list" style="display:none;"></div>
+        <div class="footer">
+          Kilde:
+          <a href="https://www.kolumbus.no/reise/trafikkinfo/" target="_blank" rel="noreferrer">Kolumbus trafikkinfo</a>
+        </div>
+      </div>
+    </section>
+
+    <script>
+      (function () {
+        var stateEl = document.getElementById("state");
+        var listEl = document.getElementById("list");
+        var metaEl = document.getElementById("meta");
+
+        function toErrorCode(raw) {
+          var normalized = String(raw || "").trim();
+          if (!normalized) return "WIDGET_UNKNOWN";
+          if (/AbortError/i.test(normalized)) return "WIDGET_TIMEOUT";
+          if (/UPSTREAM_UNAVAILABLE/i.test(normalized)) return "WIDGET_UPSTREAM_UNAVAILABLE";
+          if (/UPSTREAM_FEED_FAILED/i.test(normalized)) return "WIDGET_UPSTREAM_FEED_FAILED";
+          if (/HTTP\\s*\\d+/i.test(normalized)) return "WIDGET_HTTP_ERROR";
+          return "WIDGET_FETCH_FAILED";
+        }
+
+        function fmtTime(isoUtc) {
+          if (!isoUtc) return "";
+          var d = new Date(isoUtc);
+          if (Number.isNaN(d.getTime())) return "";
+          return new Intl.DateTimeFormat("nb-NO", {
+            timeZone: "Europe/Oslo",
+            hour: "2-digit",
+            minute: "2-digit"
+          }).format(d);
+        }
+
+        function fmtDate(isoUtc) {
+          if (!isoUtc) return "—";
+          var d = new Date(isoUtc);
+          if (Number.isNaN(d.getTime())) return "—";
+          return new Intl.DateTimeFormat("nb-NO", {
+            timeZone: "Europe/Oslo",
+            day: "2-digit",
+            month: "long"
+          }).format(d);
+        }
+
+        function fmtDateWithTime(isoUtc) {
+          if (!isoUtc) return "—";
+          var d = new Date(isoUtc);
+          if (Number.isNaN(d.getTime())) return "—";
+          return new Intl.DateTimeFormat("nb-NO", {
+            timeZone: "Europe/Oslo",
+            day: "2-digit",
+            month: "long",
+            hour: "2-digit",
+            minute: "2-digit"
+          }).format(d);
+        }
+
+        function fmtDateRange(startIso, endIso) {
+          var start = fmtDate(startIso);
+          var end = fmtDate(endIso);
+          if (start === "—" && end === "—") return "Ukjent periode";
+          if (start !== "—" && end !== "—" && start !== end) return start + " - " + end;
+          return start !== "—" ? start : end;
+        }
+
+        function primaryTransportType(m) {
+          if (Array.isArray(m.affectedModes) && m.affectedModes.length) return m.affectedModes[0];
+          var lineText = Array.isArray(m.affectedLines) ? m.affectedLines.join(" ").toLowerCase() : "";
+          if (lineText.indexOf("båt") >= 0) return "båt";
+          if (lineText.indexOf("tog") >= 0) return "tog";
+          if (lineText.indexOf("trikk") >= 0) return "trikk";
+          return "buss";
+        }
+
+        function createIcon(type) {
+          var i = document.createElement("i");
+          i.classList.add("item-icon", "fa-solid");
+          i.setAttribute("aria-hidden", "true");
+          if (type === "båt") i.classList.add("fa-ferry");
+          else if (type === "tog") i.classList.add("fa-train-tram");
+          else if (type === "trikk") i.classList.add("fa-train-tram");
+          else i.classList.add("fa-bus");
+          return i;
+        }
+
+        function renderMessages(messages) {
+          listEl.textContent = "";
+          messages.slice(0, 25).forEach(function (m) {
+            var item = document.createElement("div");
+            item.className = "item";
+
+            var head = document.createElement("div");
+            head.style.display = "flex";
+            head.style.alignItems = "center";
+            head.style.justifyContent = "space-between";
+            head.style.gap = "8px";
+
+            var period = document.createElement("div");
+            period.className = "item-date";
+            var periodWrap = document.createElement("span");
+            periodWrap.className = "item-date-wrap";
+            var iconSvg = createIcon(primaryTransportType(m));
+            var periodText = document.createElement("span");
+            periodText.textContent = fmtDateRange(m.startTime, m.endTime);
+            periodWrap.appendChild(iconSvg);
+            periodWrap.appendChild(periodText);
+            period.appendChild(periodWrap);
+            head.appendChild(period);
+
+            var infoBtn = document.createElement("button");
+            infoBtn.type = "button";
+            infoBtn.className = "info-btn";
+            infoBtn.textContent = "i";
+            infoBtn.setAttribute("aria-expanded", "false");
+            infoBtn.title = "Vis rådata";
+            head.appendChild(infoBtn);
+
+            item.appendChild(head);
+
+            var body = document.createElement("div");
+            var title = document.createElement("div");
+            title.className = "item-title";
+            var titleLink = document.createElement("a");
+            titleLink.href = m.url || "#";
+            titleLink.target = "_blank";
+            titleLink.rel = "noreferrer";
+            titleLink.style.textDecoration = "underline";
+            titleLink.textContent = m.title || "Driftsmelding";
+            title.appendChild(titleLink);
+            body.appendChild(title);
+
+            var excerptWrap = document.createElement("div");
+            if (m.excerpt) {
+              var excerpt = document.createElement("div");
+              excerpt.className = "item-excerpt";
+              excerpt.textContent = m.excerpt;
+              excerptWrap.appendChild(excerpt);
+            } else {
+              excerptWrap.className = "item-excerpt";
+              excerptWrap.textContent = "—";
+            }
+
+            var grid = document.createElement("div");
+            grid.className = "item-grid";
+            var hasAffected = false;
+
+            var stopBlock = document.createElement("div");
+            var stopLabel = document.createElement("div");
+            stopLabel.className = "item-label";
+            stopLabel.textContent = "Berørte holdeplasser";
+            stopBlock.appendChild(stopLabel);
+            if (Array.isArray(m.affectedStops) && m.affectedStops.length) {
+              hasAffected = true;
+              var stopList = document.createElement("ul");
+              stopList.className = "item-list";
+              m.affectedStops.forEach(function (s) {
+                var li = document.createElement("li");
+                li.textContent = s;
+                stopList.appendChild(li);
+              });
+              stopBlock.appendChild(stopList);
+            }
+
+            var lineBlock = document.createElement("div");
+            var lineLabel = document.createElement("div");
+            lineLabel.className = "item-label";
+            lineLabel.textContent = "Berørte linjer";
+            lineBlock.appendChild(lineLabel);
+            if (Array.isArray(m.affectedLines) && m.affectedLines.length) {
+              hasAffected = true;
+              var lineList = document.createElement("ul");
+              lineList.className = "item-list";
+              m.affectedLines.forEach(function (l) {
+                var li2 = document.createElement("li");
+                li2.textContent = l;
+                lineList.appendChild(li2);
+              });
+              lineBlock.appendChild(lineList);
+            }
+
+            var tags = document.createElement("div");
+            tags.className = "item-tags";
+            tags.textContent = "Status: " + (m.progress || "ukjent") + " | Type: " + (m.reportType || "ukjent");
+
+            item.appendChild(body);
+            item.appendChild(excerptWrap);
+            if (Array.isArray(m.affectedStops) && m.affectedStops.length) {
+              grid.appendChild(stopBlock);
+            }
+            if (Array.isArray(m.affectedLines) && m.affectedLines.length) {
+              grid.appendChild(lineBlock);
+            }
+            if (hasAffected) {
+              item.appendChild(grid);
+            }
+            item.appendChild(tags);
+
+            var rawWrap = document.createElement("div");
+            rawWrap.style.display = "none";
+
+            var rawJsonTitle = document.createElement("div");
+            rawJsonTitle.className = "raw-title";
+            rawJsonTitle.textContent = "Rå JSON";
+            var rawJsonPre = document.createElement("pre");
+            rawJsonPre.className = "raw-pre";
+            rawJsonPre.textContent = m.rawJson || "";
+
+            rawWrap.appendChild(rawJsonTitle);
+            rawWrap.appendChild(rawJsonPre);
+            item.appendChild(rawWrap);
+
+            infoBtn.addEventListener("click", function () {
+              var isOpen = rawWrap.style.display !== "none";
+              rawWrap.style.display = isOpen ? "none" : "block";
+              infoBtn.setAttribute("aria-expanded", isOpen ? "false" : "true");
+            });
+
+            listEl.appendChild(item);
+          });
+        }
+
+        function setLoading() {
+          stateEl.className = "box";
+          stateEl.textContent = "Laster driftsmeldinger…";
+          stateEl.style.display = "block";
+          listEl.style.display = "none";
+        }
+
+        function setError(message) {
+          stateEl.className = "box error";
+          stateEl.textContent = message;
+          stateEl.style.display = "block";
+          listEl.style.display = "none";
+        }
+
+        function setEmpty() {
+          stateEl.className = "box";
+          stateEl.textContent = "Ingen aktive driftsmeldinger akkurat nå.";
+          stateEl.style.display = "block";
+          listEl.style.display = "none";
+        }
+
+        function setReady() {
+          stateEl.style.display = "none";
+          listEl.style.display = "flex";
+        }
+
+        function sleep(ms) {
+          return new Promise(function (resolve) {
+            setTimeout(resolve, ms);
+          });
+        }
+
+        var MAX_FETCH_ATTEMPTS = 3;
+        var RETRY_DELAYS_MS = [450, 900];
+
+        function fetchKolumbusWithRetry() {
+          function attempt(n) {
+            var controller = new AbortController();
+            var timeoutId = setTimeout(function () {
+              controller.abort();
+            }, 8000);
+            return fetch("/api/kolumbus-messages?cacheBust=" + Date.now(), {
+              cache: "no-store",
+              signal: controller.signal,
+            })
+              .then(function (res) {
+                clearTimeout(timeoutId);
+                return res
+                  .json()
+                  .catch(function () {
+                    return {};
+                  })
+                  .then(function (json) {
+                    if (!res.ok) throw new Error(json && json.error ? json.error : "HTTP " + res.status);
+                    return json;
+                  });
+              })
+              .catch(function (err) {
+                clearTimeout(timeoutId);
+                if (n >= MAX_FETCH_ATTEMPTS - 1) throw err;
+                var wait = RETRY_DELAYS_MS[n] != null ? RETRY_DELAYS_MS[n] : 600;
+                return sleep(wait).then(function () {
+                  return attempt(n + 1);
+                });
+              });
+          }
+          return attempt(0);
+        }
+
+        function load() {
+          setLoading();
+
+          fetchKolumbusWithRetry()
+            .then(function (data) {
+              var messages = Array.isArray(data.messages) ? data.messages : [];
+              metaEl.textContent = data.lastUpdatedUtc
+                ? "Sist oppdatert: " + fmtTime(data.lastUpdatedUtc)
+                : "Oppdateres automatisk";
+
+              if (!messages.length) {
+                setEmpty();
+                return;
+              }
+              renderMessages(messages);
+              setReady();
+            })
+            .catch(function (err) {
+              setError("Kunne ikke hente driftsmeldinger nå. Feilkode: " + toErrorCode(err && err.message));
+              metaEl.textContent = "Oppdateres automatisk";
+            });
+        }
+
+        load();
+        setInterval(load, 120000);
+      })();
+    </script>
+  </body>
+</html>
+
