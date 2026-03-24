@@ -300,7 +300,7 @@ async function fetchWithTimeout(url: string): Promise<Response> {
       signal: controller.signal,
       headers: {
         Accept: "application/xml,text/xml;q=0.9,*/*;q=0.8",
-        "ET-Client-Name": process.env.ENTUR_CLIENT_NAME || "trafikken-widget",
+        "ET-Client-Name": process.env.ENTUR_CLIENT_NAME || "kolumbus-widget",
       },
     });
   } finally {
