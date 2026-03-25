@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { normalizeAvinorXml, type FlightDirection } from "@/lib/avinor";
+import { NORWEGIAN_AIRPORTS } from "@/lib/norwegianAirports";
 import { XMLParser } from "fast-xml-parser";
 
 export const dynamic = "force-dynamic";
@@ -44,6 +45,7 @@ type FlightsRouteCacheEntry = {
 
 const routeCache = new Map<string, FlightsRouteCacheEntry>();
 const routeInFlight = new Map<string, Promise<FlightsRoutePayload>>();
+const norwegianAirportCodes = new Set(NORWEGIAN_AIRPORTS.map((a) => a.code));
 
 async function sleep(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
@@ -202,7 +204,7 @@ function parseHours(value: string | null, fallback: number): number {
 
 function parseAirport(value: string | null): string {
   const v = (value ?? "").toUpperCase();
-  if (v === "SVG" || v === "BGO" || v === "OSL" || v === "TRD") return v;
+  if (norwegianAirportCodes.has(v)) return v;
   return "SVG";
 }
 

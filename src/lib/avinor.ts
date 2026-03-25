@@ -70,10 +70,14 @@ export function normalizeAvinorXml(xml: string): FlightsResponse {
       const statusCode = pickText(statusRec?.["@_code"]);
       const statusTimeUtc = pickText(statusRec?.["@_time"]);
 
+      const rawArrDep = pickText(flightRec?.["arr_dep"]);
+      const direction: FlightDirection =
+        rawArrDep && rawArrDep.toUpperCase() === "A" ? "A" : "D";
+
       return {
         uniqueId: pickText(flightRec?.["@_uniqueID"]) ?? pickText(flightRec?.["@_uniqueId"]) ?? "",
         flightId: pickText(flightRec?.["flight_id"]) ?? "",
-        direction: (pickText(flightRec?.["arr_dep"]) as FlightDirection) ?? "D",
+        direction,
         scheduleTimeUtc: pickText(flightRec?.["schedule_time"]) ?? "",
         airport: pickText(flightRec?.["airport"]) ?? "",
         airline: pickText(flightRec?.["airline"]) ?? "",

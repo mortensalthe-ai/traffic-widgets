@@ -200,36 +200,66 @@
         flex-direction: column;
       }
 
+      .mobile-rows-bulk {
+        display: flex;
+        flex-direction: column;
+      }
+
       .mobile-row {
-        padding: 10px 12px;
+        box-sizing: border-box;
+        height: 2.6rem;
+        min-height: 2.6rem;
+        max-height: 2.6rem;
+        padding: 2px 10px;
         border-bottom: 1px solid #e4e4e7;
         display: grid;
-        grid-template-columns: 70px 1fr auto;
-        align-items: start;
-        gap: 10px;
+        grid-template-columns: 64px 1fr auto;
+        align-items: center;
+        gap: 8px;
+        overflow: hidden;
       }
 
       .mobile-time {
         font-weight: 800;
         font-size: 14px;
-        line-height: 1.1;
+        line-height: 1.15;
+        min-width: 0;
+        overflow: hidden;
+        display: -webkit-box;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+        line-clamp: 2;
+      }
+
+      .mobile-mid {
+        min-width: 0;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 2px;
+        overflow: hidden;
       }
 
       .mobile-dest {
-        margin-top: 2px;
+        margin-top: 0;
         font-weight: 800;
         font-size: 14px;
-        line-height: 1.1;
+        line-height: 1.15;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
 
       .mobile-flight {
-        margin-top: 3px;
-        font-size: 12px;
+        margin-top: 0;
+        font-size: 11px;
         font-weight: 600;
         color: #374151;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
+        line-height: 1.15;
       }
 
       .mobile-sub {
@@ -243,7 +273,41 @@
         display: flex;
         flex-direction: column;
         align-items: flex-end;
+        justify-content: center;
         text-align: right;
+        min-height: 0;
+      }
+
+      tbody tr.flight-row-fixed td {
+        height: 2.6rem;
+        max-height: 2.6rem;
+        box-sizing: border-box;
+        overflow: hidden;
+        vertical-align: middle;
+        padding-top: 2px;
+        padding-bottom: 2px;
+      }
+
+      tbody tr.flight-row-fixed td .chip {
+        max-height: 1.5rem;
+      }
+
+      .table-time-wrap {
+        font-size: 14px;
+        line-height: 1.15;
+        overflow: hidden;
+        display: -webkit-box;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 2;
+        line-clamp: 2;
+      }
+
+      .table-ellipsis {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        font-size: 14px;
+        line-height: 1.15;
       }
 
       .mobile-sub--no-status {
@@ -253,8 +317,9 @@
       /* Used together with .chip (background/border colors) */
       .chip.mobile-chip {
         border-radius: 6px !important;
-        padding: 5px 8px;
+        padding: 3px 8px;
         font-size: 11px;
+        max-height: 1.5rem;
       }
 
       .tomorrow-label,
@@ -481,14 +546,20 @@
           OSL: "Oslo Lufthavn Gardermoen (OSL)",
           TRD: "Trondheim lufthavn Vaernes (TRD)",
         };
-        var maxLines = 15;
-        var initialEarlierCount = 5;
-        var initialPendingCount = 10;
-        /** Vis resten av listen (kun én vei). */
-        var showLaterRows = false;
+        /** Anker før «nå-linjen» i første vindu (innenfor LIST_VISIBLE rader). */
+        var INITIAL_PAST_COMPLETED = 5;
+        /** Alltid så mange synlige rader når listen er lang nok. */
+        var LIST_VISIBLE = 15;
+        var PAGE_STEP = 10;
+        /** Samme som FlightWidget: fast radhøyde (rem). */
+        var LIST_ROW_REM = 2.6;
+        var windowStart = 0;
+        var windowEnd = 0;
         var currentFlights = [];
         /** Utvidet tidsvindu bakover (Avinor TimeFrom: 24 t vs 1 t). */
         var showEarlier = false;
+        /** Bevar øverste synlige rad ved overgang 1 t → 24 t (unngår hopp til «anker + 15»). */
+        var preserveListScroll = null;
 
         var prevSignatureByUid = {};
         function flightSignature(f) {
@@ -571,14 +642,12 @@
           }
         }
 
-        function updateExpandButton(totalFlights, shownFlights) {
+        function updateExpandButton(totalFlights) {
           if (!expandWrap || !expandBtn) return;
-          var shown = typeof shownFlights === "number" ? shownFlights : maxLines;
-
-          if (totalFlights > shown && !showLaterRows) {
+          if (windowEnd < totalFlights) {
             expandWrap.classList.add("show");
-            var more = totalFlights - shown;
-            expandBtn.setAttribute("aria-label", "Vis " + more + " flere fly i listen (senere)");
+            var step = Math.min(PAGE_STEP, totalFlights - windowEnd);
+            expandBtn.setAttribute("aria-label", "Vis " + step + " flere fly (senere)");
             expandBtn.innerHTML =
               '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg><span class="earlier-later-label">senere</span>';
           } else {
@@ -608,6 +677,47 @@
           }).format(d);
         }
 
+        var UPCOMING_NY_TID_DEVIATION_MS = 15 * 60 * 1000;
+        var UPCOMING_SCHEDULE_ONLY_MAX_DEVIATION_MS = 5 * 60 * 1000;
+        var FORSINKET_ETTER_PLAN_MS = 30 * 60 * 1000;
+
+        function isDepartedOrArrived(flight) {
+          return flight.statusCode === "D" || flight.statusCode === "A";
+        }
+
+        function useOriginalTimeOnlyForSmallUpcomingDeviation(flight) {
+          if (!flight.statusTimeUtc || !flight.scheduleTimeUtc) return false;
+          if (isDepartedOrArrived(flight)) return false;
+          var oldMs = Date.parse(flight.scheduleTimeUtc);
+          var newMs = Date.parse(flight.statusTimeUtc);
+          if (!Number.isFinite(oldMs) || !Number.isFinite(newMs)) return false;
+          return Math.abs(newMs - oldMs) <= UPCOMING_SCHEDULE_ONLY_MAX_DEVIATION_MS;
+        }
+
+        /** Matcher FlightWidget: ny tid vs planlagt sammenlignes på visningsformat; med «i går»/«i morgen» skjules streket tid. */
+        function scheduleTimeDisplayParts(f) {
+          var scheduleLocal = fmtTime(f.scheduleTimeUtc);
+          var statusLocal = f.statusTimeUtc ? fmtTime(f.statusTimeUtc) : "";
+          var timeChanged =
+            f.statusTimeUtc &&
+            scheduleLocal !== statusLocal &&
+            !useOriginalTimeOnlyForSmallUpcomingDeviation(f);
+          var relHtml = scheduleRelativeDayHtml(f.scheduleTimeUtc);
+          var timeBody;
+          if (!timeChanged) {
+            timeBody = scheduleLocal;
+          } else if (relHtml) {
+            timeBody = statusLocal;
+          } else {
+            timeBody =
+              '<span style="text-decoration: line-through; opacity: 0.65;">' +
+              scheduleLocal +
+              "</span><br />" +
+              statusLocal;
+          }
+          return { timeBody: timeBody, relHtml: relHtml };
+        }
+
         function statusLabel(code) {
           if (!code) return "Scheduled";
           if (code === "A") return "Ankommet";
@@ -629,12 +739,18 @@
           if (flight.statusCode === "E" && flight.statusTimeUtc && flight.scheduleTimeUtc) {
             var oldMs = Date.parse(flight.scheduleTimeUtc);
             var newMs = Date.parse(flight.statusTimeUtc);
-            var deviationMs = Math.abs(newMs - oldMs);
-            var deviationOk = deviationMs > 15 * 60 * 1000; // > 15 minutes
-            var newInFuture = newMs > Date.now();
+            if (Number.isFinite(oldMs) && Number.isFinite(newMs)) {
+              var deviationMs = Math.abs(newMs - oldMs);
+              var newInFuture = newMs > Date.now();
 
-            if (Number.isFinite(oldMs) && Number.isFinite(newMs) && deviationOk && newInFuture) {
-              return { code: "E", label: "Ny tid", time: "" };
+              if (!isDepartedOrArrived(flight) && newMs > oldMs + FORSINKET_ETTER_PLAN_MS) {
+                return { code: "E", label: "Forsinket", time: "" };
+              }
+
+              var showNyTid = newInFuture && deviationMs > UPCOMING_NY_TID_DEVIATION_MS;
+              if (showNyTid) {
+                return { code: "E", label: "Ny tid", time: "" };
+              }
             }
           }
 
@@ -649,9 +765,58 @@
           };
         }
 
+        function fixedWindowFromPreferred(preferredStart, n) {
+          var V = LIST_VISIBLE;
+          if (!n) return { s: 0, e: 0 };
+          if (n <= V) return { s: 0, e: n };
+          var s = Math.max(0, Math.min(preferredStart, n - V));
+          return { s: s, e: s + V };
+        }
+
+        /** Første vindu: nøyaktig LIST_VISIBLE rader; anker på planlagt tid ≥ nå. */
+        function resetWindowFromSorted(sorted) {
+          var n = sorted.length;
+          var V = LIST_VISIBLE;
+          if (!n) {
+            windowStart = 0;
+            windowEnd = 0;
+            return;
+          }
+          if (n <= V) {
+            windowStart = 0;
+            windowEnd = n;
+            return;
+          }
+          var nowMs = Date.now();
+          var boundary = sorted.findIndex(function (f) {
+            var t = Date.parse(f.scheduleTimeUtc || "");
+            return Number.isFinite(t) && t >= nowMs;
+          });
+          if (boundary < 0) boundary = n;
+          if (boundary === n) {
+            windowStart = n - V;
+            windowEnd = n;
+            return;
+          }
+          var preferredStart = Math.max(0, boundary - INITIAL_PAST_COMPLETED);
+          var fw = fixedWindowFromPreferred(preferredStart, n);
+          windowStart = fw.s;
+          windowEnd = fw.e;
+        }
+
         function earlierLoadButtonHtml() {
-          var label = direction === "D" ? "Last inn tidligere avganger" : "Last inn tidligere ankomster";
-          var title = direction === "D" ? "Vis tidligere avganger" : "Vis tidligere ankomster";
+          var canPageEarlier = windowStart > 0;
+          var stepEarlier = Math.min(PAGE_STEP, windowStart);
+          var label = canPageEarlier
+            ? "Vis " + stepEarlier + " tidligere fly"
+            : direction === "D"
+              ? "Last inn tidligere avganger"
+              : "Last inn tidligere ankomster";
+          var title = canPageEarlier
+            ? "Bla 10 fly opp i listen"
+            : direction === "D"
+              ? "Hent flere avganger bakover i tid"
+              : "Hent flere ankomster bakover i tid";
           return (
             '<button type="button" class="earlier-load-btn" aria-label="' +
             label +
@@ -664,8 +829,12 @@
           );
         }
 
+        function showEarlierControls() {
+          return currentFlights.length > 0 && (windowStart > 0 || !showEarlier);
+        }
+
         function earlierTableRowHtml() {
-          if (showEarlier) return "";
+          if (!showEarlierControls()) return "";
           return (
             '<tr class="earlier-row"><td colspan="6">' +
             '<div class="earlier-bar">' +
@@ -675,7 +844,7 @@
         }
 
         function earlierMobileBarHtml() {
-          if (showEarlier) return "";
+          if (!showEarlierControls()) return "";
           return '<div class="earlier-bar">' + earlierLoadButtonHtml() + "</div>";
         }
 
@@ -688,7 +857,7 @@
             if (mobileListEl) {
               mobileListEl.innerHTML = earlierMobileBarHtml() + emptyMobile;
             }
-            updateExpandButton(0, 0);
+            updateExpandButton(0);
             return;
           }
 
@@ -700,80 +869,45 @@
               return (a.scheduleTimeUtc || "").localeCompare(b.scheduleTimeUtc || "");
             });
 
-          var visible;
-          if (showLaterRows) {
-            visible = limited;
-          } else {
-            var nowMs = Date.now();
-            var completedCode = direction === "D" ? "D" : "A";
-            var earlierCompleted = limited
-              .filter(function (f) {
-                var t = Date.parse(f.scheduleTimeUtc || "");
-                return Number.isFinite(t) && t < nowMs && f.statusCode === completedCode;
-              })
-              .slice(-initialEarlierCount);
-            var pending = limited
-              .filter(function (f) {
-                return f.statusCode !== completedCode;
-              })
-              .slice(0, initialPendingCount);
-            var picked = earlierCompleted.concat(pending);
-            if (!picked.length) {
-              visible = limited.slice(0, maxLines);
-            } else {
-              var seen = {};
-              var unique = [];
-              picked.forEach(function (f) {
-                var id = f.uniqueId || "";
-                if (!id || seen[id]) return;
-                seen[id] = true;
-                unique.push(f);
-              });
-              visible = unique.sort(function (a, b) {
-                return (a.scheduleTimeUtc || "").localeCompare(b.scheduleTimeUtc || "");
-              });
-            }
-          }
+          var visible = limited.slice(windowStart, windowEnd);
 
-          updateExpandButton(limited.length, visible.length);
+          updateExpandButton(limited.length);
 
           var html = visible.map(function (f) {
             var status = getEffectiveStatus(f);
+            var timeParts = scheduleTimeDisplayParts(f);
+            var trCls = "flight-row-fixed";
+            if (highlightUids && highlightUids[f.uniqueId]) trCls += " updated-row";
             return (
-              "<tr" +
-              (highlightUids && highlightUids[f.uniqueId] ? ' class="updated-row"' : "") +
-              ">" +
-              '<td data-label="Time"><strong>' +
-              (f.statusTimeUtc && f.statusTimeUtc !== f.scheduleTimeUtc
-                ? '<span style="text-decoration: line-through; opacity: 0.65;">' +
-                  fmtTime(f.scheduleTimeUtc) +
-                  "</span><br />" +
-                  fmtTime(f.statusTimeUtc)
-                : fmtTime(f.scheduleTimeUtc)) +
+              "<tr class=\"" +
+              trCls +
+              "\">" +
+              '<td data-label="Time"><div class="table-time-wrap"><strong>' +
+              timeParts.timeBody +
               "</strong>" +
-              scheduleRelativeDayHtml(f.scheduleTimeUtc) +
-              "</td>" +
+              timeParts.relHtml +
+              "</div></td>" +
               '<td data-label="' +
               toFromLabel +
-              '">' +
+              '"><div class="table-ellipsis">' +
               ((f.airportName || f.airport) || "") +
-              "</td>" +
-              '<td data-label="Flight">' +
+              "</div></td>" +
+              '<td data-label="Flight"><div class="table-ellipsis">' +
               (f.flightId || "") +
               '<span style="margin: 0 6px; color:#64748b;">|</span>' +
               ((f.airlineName || f.airline) || "") +
-              "</td>" +
+              "</div></td>" +
               '<td data-label="Status">' +
               (status.label !== "Scheduled"
                 ? '<span class="chip ' + statusClass(status.code) + '">' + status.label + "</span>"
                 : "") +
               "</td>" +
-              '<td data-label="Gate">' +
+              '<td data-label="Gate"><div class="table-ellipsis">' +
               (f.gate && f.gate !== "—" ? f.gate : "") +
-              "</td>" +
-              '<td data-label="Belt">' +
+              "</div></td>" +
+              '<td data-label="Belt"><div class="table-ellipsis">' +
               (f.beltNumber && f.beltNumber !== "—" ? f.beltNumber : "") +
-              "</td>" +
+              "</div></td>" +
               "</tr>"
             );
           }).join("");
@@ -797,25 +931,17 @@
                 var airlineName = f.airlineName || f.airline || "";
                 var flightLine = (f.flightId || "") + " | " + airlineName + (gateOrBeltText ? " | " + gateOrBeltText : "");
 
-                var scheduleLocal = fmtTime(f.scheduleTimeUtc);
-                var timeChanged = f.statusTimeUtc && f.statusTimeUtc !== f.scheduleTimeUtc;
-                var newLocal = timeChanged ? fmtTime(f.statusTimeUtc) : "";
-                var timeHtml = timeChanged
-                  ? '<span style="text-decoration: line-through; opacity: 0.65;">' +
-                    scheduleLocal +
-                    "</span><br />" +
-                    newLocal
-                  : scheduleLocal;
+                var timeParts = scheduleTimeDisplayParts(f);
 
                 return (
                   '<div class="mobile-row' +
                   (highlightUids && highlightUids[f.uniqueId] ? " updated-row" : "") +
                   '">' +
                   '<div class="mobile-time">' +
-                  timeHtml +
-                  scheduleRelativeDayHtml(f.scheduleTimeUtc) +
+                  timeParts.timeBody +
+                  timeParts.relHtml +
                   "</div>" +
-                  '<div style="min-width: 0;">' +
+                  '<div class="mobile-mid">' +
                   '<div class="mobile-dest">' +
                   placeName +
                   "</div>" +
@@ -838,7 +964,15 @@
               })
               .join("");
 
-            mobileListEl.innerHTML = earlierMobileBarHtml() + mobileHtml;
+            var bulk =
+              limited.length >= LIST_VISIBLE
+                ? '<div class="mobile-rows-bulk" style="min-height:' +
+                  LIST_VISIBLE * LIST_ROW_REM +
+                  'rem">' +
+                  mobileHtml +
+                  "</div>"
+                : mobileHtml;
+            mobileListEl.innerHTML = earlierMobileBarHtml() + bulk;
           }
         }
 
@@ -952,11 +1086,15 @@
           return attempt(0);
         }
 
-        function load(showLoadingUi) {
+        /**
+         * @param {boolean} showLoadingUi full innlasting (tab/flyplass/refresh)
+         * @param {boolean} [keepListVisible] behold synlig liste under lasting (24t ved «tidligere»)
+         */
+        function load(showLoadingUi, keepListVisible) {
           if (showLoadingUi === undefined) showLoadingUi = true;
-          if (showLoadingUi) showLaterRows = false;
+          if (keepListVisible === undefined) keepListVisible = false;
 
-          if (showLoadingUi) {
+          if (showLoadingUi && !keepListVisible) {
             currentFlights = [];
             rowsEl.innerHTML =
               '<tr><td colspan="6" style="color:#52525b;">' +
@@ -982,7 +1120,9 @@
           clearError();
           setTabs();
           setAirportTabs();
-          setRefreshing(true);
+          if (showLoadingUi || keepListVisible) {
+            setRefreshing(true);
+          }
 
           fetchFlightsWithRetry()
             .then(function (data) {
@@ -1005,11 +1145,46 @@
                 prevSignatureByUid[f.uniqueId] = flightSignature(f);
               });
 
+              var sortedForWindow = nextFlights.slice().sort(function (a, b) {
+                return (a.scheduleTimeUtc || "").localeCompare(b.scheduleTimeUtc || "");
+              });
+              if (showLoadingUi || keepListVisible) {
+                var ps = preserveListScroll;
+                if (
+                  ps &&
+                  ps.airport === airport &&
+                  ps.direction === direction &&
+                  showEarlier &&
+                  ps.topUid
+                ) {
+                  preserveListScroll = null;
+                  var idxKept = sortedForWindow.findIndex(function (f) {
+                    return f.uniqueId === ps.topUid;
+                  });
+                  if (idxKept >= 0) {
+                    var stepKept = Math.min(PAGE_STEP, idxKept);
+                    var preferredKept = Math.max(0, idxKept - stepKept);
+                    var fwKept = fixedWindowFromPreferred(preferredKept, sortedForWindow.length);
+                    windowStart = fwKept.s;
+                    windowEnd = fwKept.e;
+                  } else {
+                    resetWindowFromSorted(sortedForWindow);
+                  }
+                } else {
+                  if (preserveListScroll) preserveListScroll = null;
+                  resetWindowFromSorted(sortedForWindow);
+                }
+              } else {
+                windowEnd = Math.min(windowEnd, sortedForWindow.length);
+                windowStart = Math.min(windowStart, Math.max(0, sortedForWindow.length - 1));
+              }
+
               currentFlights = nextFlights;
               renderRows(currentFlights, highlightUids);
             })
             .catch(function (err) {
-              if (showLoadingUi) {
+              preserveListScroll = null;
+              if (showLoadingUi && !keepListVisible) {
                 rowsEl.innerHTML = '<tr><td colspan="6" style="color:#52525b;">Ingen data tilgjengelig.</td></tr>';
                 if (mobileListEl) {
                   mobileListEl.innerHTML =
@@ -1031,9 +1206,9 @@
         tabs.forEach(function (btn) {
           if (!btn) return;
           btn.addEventListener("click", function () {
+            preserveListScroll = null;
             direction = btn.dataset.dir || "D";
             showEarlier = false;
-            showLaterRows = false;
             load(true);
           });
         });
@@ -1042,9 +1217,32 @@
         if (contentEl) {
           contentEl.addEventListener("click", function (e) {
             if (!e.target.closest(".earlier-bar .earlier-load-btn")) return;
-            showEarlier = true;
-            showLaterRows = false;
-            load(true);
+            if (windowStart > 0) {
+              var nList = currentFlights.length;
+              var stepUp = Math.min(PAGE_STEP, windowStart);
+              var preferredUp = Math.max(0, windowStart - stepUp);
+              var fwUp = fixedWindowFromPreferred(preferredUp, nList);
+              windowStart = fwUp.s;
+              windowEnd = fwUp.e;
+              renderRows(currentFlights, {});
+              return;
+            }
+            if (!showEarlier) {
+              var lim0 = currentFlights
+                .slice()
+                .sort(function (a, b) {
+                  return (a.scheduleTimeUtc || "").localeCompare(b.scheduleTimeUtc || "");
+                });
+              var top0 = lim0[windowStart];
+              preserveListScroll = {
+                topUid: top0 && top0.uniqueId ? top0.uniqueId : "",
+                visibleCount: windowEnd - windowStart,
+                airport: airport,
+                direction: direction,
+              };
+              showEarlier = true;
+              load(true, true);
+            }
           });
         }
 
@@ -1052,9 +1250,9 @@
           airportBtns.forEach(function (btn) {
             if (!btn) return;
             btn.addEventListener("click", function () {
+              preserveListScroll = null;
               airport = btn.dataset.airport || "SVG";
               showEarlier = false;
-              showLaterRows = false;
               load(true);
             });
           });
@@ -1062,12 +1260,17 @@
 
         if (expandBtn) {
           expandBtn.addEventListener("click", function () {
-            showLaterRows = true;
+            var n = currentFlights.length;
+            var slide = Math.min(PAGE_STEP, n - windowEnd);
+            if (slide <= 0) return;
+            windowStart += slide;
+            windowEnd = Math.min(n, windowEnd + slide);
             renderRows(currentFlights, {});
           });
         }
 
         document.getElementById("refresh").addEventListener("click", function () {
+          preserveListScroll = null;
           load(true);
         });
         setInterval(function () {

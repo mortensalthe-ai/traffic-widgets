@@ -1,4 +1,10 @@
-import { FlightWidget } from "@/components/FlightWidget";
+"use client";
+
+import dynamic from "next/dynamic";
+
+const FlightWidget = dynamic(() => import("@/components/FlightWidget").then((m) => m.FlightWidget), {
+  ssr: false,
+});
 
 export default function AvinorPage() {
   return (

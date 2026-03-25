@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { FaBus, FaFerry, FaTrainTram } from "react-icons/fa6";
 
@@ -51,12 +51,16 @@ export function KolumbusWidget() {
   const [lastUpdatedUtc, setLastUpdatedUtc] = useState<string>("");
   const [error, setError] = useState<string>("");
   const [expandedRawById, setExpandedRawById] = useState<Record<string, boolean>>({});
+  const hasLoadedOnceRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
 
     async function load() {
-      setLoading(true);
+      const silentPoll = hasLoadedOnceRef.current;
+      if (!silentPoll) {
+        setLoading(true);
+      }
       setError("");
 
       let lastError: unknown;
@@ -88,7 +92,10 @@ export function KolumbusWidget() {
           if (!cancelled) {
             setMessages(json.messages);
             setLastUpdatedUtc(json.lastUpdatedUtc ?? "");
-            setExpandedRawById({});
+            if (!silentPoll) {
+              setExpandedRawById({});
+            }
+            hasLoadedOnceRef.current = true;
           }
           if (!cancelled) setLoading(false);
           return;
@@ -198,6 +205,7 @@ export function KolumbusWidget() {
                   </div>
                   <button
                     type="button"
+                    aria-label={expandedRawById[m.id] ? "Skjul rådata" : "Vis rådata"}
                     aria-expanded={Boolean(expandedRawById[m.id])}
                     onClick={() =>
                       setExpandedRawById((prev) => ({
@@ -206,7 +214,6 @@ export function KolumbusWidget() {
                       }))
                     }
                     className="inline-flex h-6 w-6 items-center justify-center rounded-md border border-zinc-300 bg-white text-[11px] font-bold text-zinc-700 hover:bg-zinc-100"
-                    title="Vis rådata"
                   >
                     i
                   </button>

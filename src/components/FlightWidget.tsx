@@ -1,9 +1,23 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent,
+  type TransitionEvent,
+} from "react";
+import {
+  effectiveStatus,
+  statusClass,
+  useOriginalTimeOnlyForSmallUpcomingDeviation,
+} from "../lib/flightStatusConfig";
+import { NORWEGIAN_AIRPORTS, norwegianAirportLabelByCode } from "../lib/norwegianAirports";
 
 type Direction = "D" | "A";
-type AirportCode = "SVG" | "BGO" | "OSL" | "TRD";
+type AirportCode = string;
 
 type Flight = {
   uniqueId: string;
@@ -43,14 +57,62 @@ type WidgetError = {
   technicalDetails?: string;
 };
 
+/** Under paging: utvidet utsnitt av rader som glir i mobil-listepanelet. */
+type ListPanelStrip = {
+  kind: "later" | "earlier";
+  flights: Flight[];
+  nextWindow: { start: number; end: number };
+};
+
 /** Antall forsøk ved nettverks-/serverfeil før feilmelding vises. */
 const FETCH_MAX_ATTEMPTS = 3;
 const FETCH_RETRY_DELAYS_MS = [450, 900] as const;
+
+/** Alltid så mange synlige rader (når listen er lang nok). */
+const FLIGHT_LIST_VISIBLE = 15;
+/** Anker før «nå-linjen» i første vindu (innenfor de 15 radene). */
+const FLIGHT_LIST_PAST_BEFORE_BOUNDARY = 5;
+/** Bla «tidligere»/«senere» så mange rader om gangen. */
+const FLIGHT_LIST_PAGE_STEP = 10;
+/** Fast radhøyde (rem) — alle rader like høye på mobil og i tabell. */
+const FLIGHT_LIST_ROW_HEIGHT_REM = 2.8;
+/** Smal kolonne for HH:MM (+ ev. «i går» / forsinket to-linje); gir mer plass til rute og status. */
+const FLIGHT_LIST_TIME_COL = "3.25rem";
+/** Glid i mobil-listepanelet ved «tidligere»/«senere» (ikke sidescroll). */
+const FLIGHT_LIST_PANEL_SLIDE_MS = 400;
+/** Felles easing — «tidligere» bruker samme mønster som «senere» (snap → glid). */
+const FLIGHT_LIST_PANEL_SLIDE_EASING = "cubic-bezier(0.33, 0.86, 0.25, 1)";
+
+/** «tidligere» / «senere»: ingen tekstmarkering; tydelig stil når klikkbar (`enabled:`). */
+const LIST_SCROLL_NAV_BUTTON_CLASS =
+  "flex min-h-9 w-full select-none items-center justify-center gap-1.5 rounded-none border-0 bg-transparent py-1.5 transition-colors active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-inset " +
+  "disabled:pointer-events-none disabled:cursor-not-allowed disabled:text-zinc-400 disabled:opacity-45 " +
+  "enabled:cursor-pointer enabled:font-semibold enabled:text-zinc-800 enabled:hover:bg-zinc-100 enabled:hover:text-zinc-950 enabled:active:bg-zinc-200/70";
+
+/** Vindu [start,end) med nøyaktig min(VISIBLE,n) rader, start nær ønsket indeks. */
+function fixedWindowFromPreferredStart(preferredStart: number, n: number): { start: number; end: number } {
+  const V = FLIGHT_LIST_VISIBLE;
+  if (n === 0) return { start: 0, end: 0 };
+  if (n <= V) return { start: 0, end: n };
+  const s = Math.max(0, Math.min(preferredStart, n - V));
+  return { start: s, end: s + V };
+}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     window.setTimeout(resolve, ms);
   });
+}
+
+function prefersReducedMotion(): boolean {
+  if (typeof window === "undefined") return false;
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+}
+
+function flightRowHeightPx(): number {
+  if (typeof document === "undefined") return 16 * FLIGHT_LIST_ROW_HEIGHT_REM;
+  const rem = parseFloat(getComputedStyle(document.documentElement).fontSize || "16");
+  return rem * FLIGHT_LIST_ROW_HEIGHT_REM;
 }
 
 function fmtTime(isoUtc: string | undefined) {
@@ -64,52 +126,53 @@ function fmtTime(isoUtc: string | undefined) {
   }).format(d);
 }
 
-function statusLabel(code?: string): string {
-  if (!code) return "Scheduled";
-  if (code === "A") return "Ankommet";
-  if (code === "C") return "Kansellert";
-  if (code === "D") return "Avgått";
-  if (code === "E") return "Ny tid";
-  if (code === "N") return "Ny info";
-  return code;
+/** Dato-nøkkel (YYYY-MM-DD) i Europe/Oslo — modulnivå for stabil SSR/klient. */
+const osloDateKeyFormatter = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "Europe/Oslo",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+function formatYmdOslo(d: Date): string {
+  return osloDateKeyFormatter.format(d);
 }
 
-function effectiveStatus(flight: Flight): { code?: string; label: string; showStatusTime: boolean } {
-  const code = flight.statusCode;
-  if (code === "E" && flight.statusTimeUtc && flight.scheduleTimeUtc) {
-    const oldMs = Date.parse(flight.scheduleTimeUtc);
-    const newMs = Date.parse(flight.statusTimeUtc);
-
-    if (Number.isFinite(oldMs) && Number.isFinite(newMs)) {
-      const deviationMs = Math.abs(newMs - oldMs);
-      const deviationOk = deviationMs > 15 * 60 * 1000; // > 15 minutes
-      const newInFuture = newMs > Date.now();
-
-      if (deviationOk && newInFuture) {
-        return { code: "E", label: "Ny tid", showStatusTime: false };
-      }
-    }
-
-    return { code: undefined, label: "Scheduled", showStatusTime: false };
-  }
-
-  if (flight.statusTextNo) {
-    return { code, label: flight.statusTextNo, showStatusTime: false };
-  }
-
-  return {
-    code,
-    label: statusLabel(code),
-    showStatusTime: Boolean(flight.statusTimeUtc),
-  };
+/**
+ * Avinor XML: `flight.airport` er motpartens IATA-kode (mål for avgang, avreise for ankomst).
+ * Oppstrøms feed er allerede filtrert på airport+direction; vi beholder retning som sikkerhetsnett
+ * (etter normalisert arr_dep i parse). Rad der motpart = hub er topologisk umulig som ordinær rute
+ * og kommer ofte fra feil i feed (visning som «Bergen» på avgang fra Bergen).
+ * Manglende airport-kode: behold raden (sjeldent; bedre enn å skjule gyldig fly).
+ */
+function flightMatchesSelectedView(f: Flight, hub: AirportCode, dir: Direction): boolean {
+  if (f.direction !== dir) return false;
+  const other = (f.airport ?? "").trim().toUpperCase();
+  if (!other) return true;
+  if (other === hub) return false;
+  return true;
 }
 
-function statusClass(code?: string): string {
-  if (code === "C") return "bg-red-50 text-red-700 ring-red-200";
-  // Blue-ish “positive” styling to better match the examples.
-  if (code === "D" || code === "A") return "bg-sky-50 text-sky-700 ring-sky-200";
-  if (code === "E" || code === "N") return "bg-amber-50 text-amber-800 ring-amber-200";
-  return "bg-zinc-50 text-zinc-700 ring-zinc-200";
+
+/** Første vindu: nøyaktig 15 rader (eller alle om færre totalt), anker rundt første planlagte tid ≥ nå. */
+function initialListWindow(sorted: Flight[]): { start: number; end: number } {
+  const n = sorted.length;
+  const V = FLIGHT_LIST_VISIBLE;
+  if (n === 0) return { start: 0, end: 0 };
+  if (n <= V) return { start: 0, end: n };
+
+  const nowMs = Date.now();
+  let boundary = sorted.findIndex((f) => {
+    const t = Date.parse(f.scheduleTimeUtc);
+    return Number.isFinite(t) && t >= nowMs;
+  });
+  if (boundary < 0) boundary = n;
+
+  if (boundary === n) {
+    return { start: n - V, end: n };
+  }
+
+  const preferredStart = Math.max(0, boundary - FLIGHT_LIST_PAST_BEFORE_BOUNDARY);
+  return fixedWindowFromPreferredStart(preferredStart, n);
 }
 
 export function FlightWidget() {
@@ -120,17 +183,59 @@ export function FlightWidget() {
   const [error, setError] = useState<WidgetError | null>(null);
   const [showErrorDetails, setShowErrorDetails] = useState(false);
   const [refreshIndex, setRefreshIndex] = useState(0);
-  /** Vis resten av listen (kun én vei — som «tidligere» øverst). */
-  const [showLaterRows, setShowLaterRows] = useState(false);
+  /** Vindu inn i sortert liste: [windowStart, windowEnd). */
+  const [windowStart, setWindowStart] = useState(0);
+  const [windowEnd, setWindowEnd] = useState(0);
   /** Utvidet tidsvindu bakover (Avinor TimeFrom: 24 t vs 1 t). */
   const [showEarlier, setShowEarlier] = useState(false);
+  /** 24t-henting pågår — holder «tidligere»-raden synlig uten layout-hopp. */
+  const [earlierExpandLoading, setEarlierExpandLoading] = useState(false);
+  /** translateY (px) for mobil flyliste i eget panel — tidligere/senere. */
+  const [listPanelOffsetY, setListPanelOffsetY] = useState(0);
+  const [listPanelSliding, setListPanelSliding] = useState(false);
+  /** Når false: ingen transition (snap til start før «tidligere»), så vi ikke animerer 0→-X ved uhell. */
+  const [listPanelTransformArmed, setListPanelTransformArmed] = useState(true);
+  const mobileListPanelRef = useRef<HTMLDivElement | null>(null);
+  const navTapTsRef = useRef(0);
 
-  const airportLabels: Record<AirportCode, string> = {
-    SVG: "Stavanger Lufthavn Sola (SVG)",
-    BGO: "Bergen lufthavn Flesland (BGO)",
-    OSL: "Oslo Lufthavn Gardermoen (OSL)",
-    TRD: "Trondheim lufthavn Vaernes (TRD)",
-  };
+  const airportLabels: Record<string, string> = norwegianAirportLabelByCode;
+  const airportMenuRef = useRef<HTMLDivElement | null>(null);
+  const airportMenuWrapRef = useRef<HTMLDivElement | null>(null);
+  const airportMenuButtonRef = useRef<HTMLButtonElement | null>(null);
+  const [airportMenuOpen, setAirportMenuOpen] = useState(false);
+  const [airportMenuPos, setAirportMenuPos] = useState<{ top: number; left: number; width: number } | null>(
+    null,
+  );
+
+  useLayoutEffect(() => {
+    if (!airportMenuOpen) return;
+    const btn = airportMenuButtonRef.current;
+    if (!btn) return;
+
+    const rect = btn.getBoundingClientRect();
+    const vw = window.innerWidth || 0;
+    const margin = 8;
+    const desired = 304; // ~19rem
+    const width = Math.max(200, Math.min(desired, vw - margin * 2));
+    const center = rect.left + rect.width / 2;
+    const left = Math.max(margin, Math.min(center - width / 2, vw - width - margin));
+    const top = rect.bottom + 8;
+    setAirportMenuPos({ top, left, width });
+  }, [airportMenuOpen]);
+
+  useEffect(() => {
+    if (!airportMenuOpen) return;
+    function onDocPointerDown(e: PointerEvent) {
+      const t = e.target as Node | null;
+      if (!t) return;
+      // Klikk i menyen eller på menyknappen skal ikke lukke (menyvalg lukker selv).
+      if (airportMenuRef.current && airportMenuRef.current.contains(t)) return;
+      if (airportMenuButtonRef.current && airportMenuButtonRef.current.contains(t)) return;
+      setAirportMenuOpen(false);
+    }
+    document.addEventListener("pointerdown", onDocPointerDown);
+    return () => document.removeEventListener("pointerdown", onDocPointerDown);
+  }, [airportMenuOpen]);
 
   type UserMessageError = Error & { __userMessage?: string };
 
@@ -139,18 +244,48 @@ export function FlightWidget() {
   const manualFetchRef = useRef(false);
   const clearUpdatedTimerRef = useRef<number | null>(null);
   const hasInitialFetchRef = useRef(false);
+  /** Tom når listen er tømt — sørger for at ny flyplass/data alltid kjører initialListWindow. */
+  const windowListKeyRef = useRef("");
+  const prevSortedLenRef = useRef(0);
+  /**
+   * Ved 24t-«tidligere»: ikke scroll før ny data er på plass (unngår anvendelse på 1t-listen).
+   * `listExpanded` når lengden øker eller første rad endrer seg (ny historikk foran).
+   */
+  const pendingEarlier24hRef = useRef<{
+    topUid: string;
+    /** Siste synlige rad før 24t — brukes til strip-lengde ved animasjon. */
+    bottomUid: string;
+    visibleCount: number;
+    airport: AirportCode;
+    direction: Direction;
+    listLenAtClick: number;
+    firstRowUidAtClick: string;
+  } | null>(null);
+  const [listPanelStrip, setListPanelStrip] = useState<ListPanelStrip | null>(null);
+  const listPanelStripRef = useRef<ListPanelStrip | null>(null);
+  useEffect(() => {
+    listPanelStripRef.current = listPanelStrip;
+  }, [listPanelStrip]);
 
-  const ymdFormatter = new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Europe/Oslo",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  });
-  const localYmd = (d: Date) => ymdFormatter.format(d);
-  const nowKey = localYmd(new Date());
-  const [nowY, nowM, nowD] = nowKey.split("-").map((x) => Number(x));
-  const yesterdayKey = localYmd(new Date(Date.UTC(nowY, nowM - 1, nowD - 1, 12, 0, 0)));
-  const tomorrowKey = localYmd(new Date(Date.UTC(nowY, nowM - 1, nowD + 1, 12, 0, 0)));
+  /** Unngår hydration-feil fra new Date()/Date.now() som avviker mellom server og første klient-render. */
+  const [clientNowMs, setClientNowMs] = useState<number | null>(null);
+  useEffect(() => {
+    setClientNowMs(Date.now());
+    const id = window.setInterval(() => setClientNowMs(Date.now()), 60_000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const { yesterdayKey, tomorrowKey } = useMemo(() => {
+    if (clientNowMs === null) {
+      return { yesterdayKey: "__none__", tomorrowKey: "__none__" } as const;
+    }
+    const nowKey = formatYmdOslo(new Date(clientNowMs));
+    const [nowY, nowM, nowD] = nowKey.split("-").map((x) => Number(x));
+    return {
+      yesterdayKey: formatYmdOslo(new Date(Date.UTC(nowY, nowM - 1, nowD - 1, 12, 0, 0))),
+      tomorrowKey: formatYmdOslo(new Date(Date.UTC(nowY, nowM - 1, nowD + 1, 12, 0, 0))),
+    };
+  }, [clientNowMs]);
 
   function flightSignature(f: Flight): string {
     return [
@@ -190,7 +325,10 @@ export function FlightWidget() {
     let cancelled = false;
 
     async function run() {
-      setLoading(true);
+      // Bakgrunnsoppdatering (interval) skal ikke skjule listen eller «tidligere»-knappen.
+      if (data === null) {
+        setLoading(true);
+      }
       setError(null);
       setShowErrorDetails(false);
 
@@ -234,6 +372,7 @@ export function FlightWidget() {
             const nextFlights = json.flights;
             const wasManual = manualFetchRef.current;
             manualFetchRef.current = false;
+            setEarlierExpandLoading(false);
 
             // Første automatiske innlasting skal ikke "flash'e" alle rader.
             if (wasManual || hasInitialFetchRef.current) {
@@ -246,7 +385,7 @@ export function FlightWidget() {
                   const uid = f.uniqueId;
                   const sig = flightSignature(f);
                   nextMap.set(uid, sig);
-                  if (prevMap.get(uid) !== sig) changed.add(uid);
+                  if (prevMap.has(uid) && prevMap.get(uid) !== sig) changed.add(uid);
                 }
 
                 prevSignatureByUidRef.current = nextMap;
@@ -308,6 +447,12 @@ export function FlightWidget() {
           technicalDetails: maskedTechnical,
         });
         setLoading(false);
+        setEarlierExpandLoading(false);
+        pendingEarlier24hRef.current = null;
+        setListPanelStrip(null);
+        setListPanelSliding(false);
+        setListPanelTransformArmed(true);
+        setListPanelOffsetY(0);
       }
     }
     run();
@@ -316,50 +461,306 @@ export function FlightWidget() {
     };
   }, [direction, refreshIndex, airport, showEarlier]);
 
-  const maxLines = 15;
-  const initialEarlierCount = 5;
-  const initialPendingCount = 10;
   const sortedFlights = useMemo(() => {
     const list = data?.flights ?? [];
-    // Ikke kutt listen her: «senere» skal kunne nå morgendagens fly også ved store datamengder.
-    return [...list].sort((a, b) => a.scheduleTimeUtc.localeCompare(b.scheduleTimeUtc));
-  }, [data]);
+    const filtered = list.filter((f) => flightMatchesSelectedView(f, airport, direction));
+    return [...filtered].sort((a, b) => a.scheduleTimeUtc.localeCompare(b.scheduleTimeUtc));
+  }, [data, airport, direction]);
 
-  const displayedFlights = useMemo(() => {
-    if (showLaterRows) return sortedFlights;
-    const nowMs = Date.now();
-    const completedCode = direction === "D" ? "D" : "A";
+  /** Før paint: unngå ett «blink» med gammelt vindu mens ny data (f.eks. 24t) allerede er i state. */
+  useLayoutEffect(() => {
+    const n = sortedFlights.length;
+    const key = `${airport}|${direction}|${showEarlier}`;
+    const keyChanged = windowListKeyRef.current !== key;
+    const becameAvailable = prevSortedLenRef.current === 0 && n > 0;
+    prevSortedLenRef.current = n;
 
-    const earlierCompleted = sortedFlights
-      .filter((f) => Date.parse(f.scheduleTimeUtc) < nowMs && f.statusCode === completedCode)
-      .slice(-initialEarlierCount);
+    if (n === 0) {
+      setWindowStart(0);
+      setWindowEnd(0);
+      windowListKeyRef.current = "";
+      pendingEarlier24hRef.current = null;
+      setListPanelStrip(null);
+      setListPanelSliding(false);
+      setListPanelTransformArmed(true);
+      setListPanelOffsetY(0);
+      return;
+    }
 
-    const pending = sortedFlights
-      .filter((f) => f.statusCode !== completedCode)
-      .slice(0, initialPendingCount);
+    /** Ikke klem/tilordne vindu mens mobil-strip animerer (unngår hopp og dobbeltkjøring). */
+    if (listPanelStrip !== null || listPanelSliding) {
+      return;
+    }
 
-    const picked = [...earlierCompleted, ...pending];
-    if (picked.length === 0) return sortedFlights.slice(0, maxLines);
+    const pend = pendingEarlier24hRef.current;
+    const listExpandedForEarlier =
+      pend &&
+      showEarlier &&
+      pend.topUid &&
+      pend.airport === airport &&
+      pend.direction === direction &&
+      (n > pend.listLenAtClick ||
+        (sortedFlights[0] !== undefined &&
+          sortedFlights[0].uniqueId !== pend.firstRowUidAtClick));
 
-    const byId = new Map<string, Flight>();
-    for (const f of picked) byId.set(f.uniqueId, f);
-    return [...byId.values()].sort((a, b) => a.scheduleTimeUtc.localeCompare(b.scheduleTimeUtc));
-  }, [showLaterRows, sortedFlights, direction]);
+    if (listExpandedForEarlier) {
+      const idx =
+        sortedFlights.findIndex((f) => f.uniqueId === pend!.topUid) >= 0
+          ? sortedFlights.findIndex((f) => f.uniqueId === pend!.topUid)
+          : sortedFlights.findIndex((f) => f.uniqueId === pend!.firstRowUidAtClick);
+      pendingEarlier24hRef.current = null;
+      if (idx >= 0) {
+        // Når 24t-lista kommer inn: behandle klikket som et vanlig "bla 10 rader opp".
+        // Hvis det finnes færre enn 10 nye rader, clampler vi til 0.
+        const preferred = Math.max(0, idx - FLIGHT_LIST_PAGE_STEP);
+        const { start, end } = fixedWindowFromPreferredStart(preferred, n);
+        windowListKeyRef.current = key;
 
-  const showLaterButton = sortedFlights.length > displayedFlights.length && !showLaterRows;
+        const bottomUid = pend!.bottomUid;
+        const idxBottom = bottomUid ? sortedFlights.findIndex((f) => f.uniqueId === bottomUid) : -1;
+        const shift = idx - start;
+
+        const canAnimate24hStrip =
+          !prefersReducedMotion() &&
+          shift > 0 &&
+          idxBottom >= 0 &&
+          !listPanelSliding &&
+          listPanelStrip === null;
+
+        if (canAnimate24hStrip) {
+          const stripEnd = Math.min(
+            n,
+            Math.max(end, idxBottom + 1, idx + FLIGHT_LIST_VISIBLE),
+          );
+          const flights = sortedFlights.slice(start, stripEnd);
+          const rowPx = flightRowHeightPx();
+          setListPanelTransformArmed(false);
+          setWindowStart(start);
+          setWindowEnd(end);
+          setListPanelStrip({ kind: "earlier", flights, nextWindow: { start, end } });
+          setListPanelOffsetY(-shift * rowPx);
+          setListPanelSliding(true);
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              setListPanelTransformArmed(true);
+              requestAnimationFrame(() => {
+                setListPanelOffsetY(0);
+              });
+            });
+          });
+          return;
+        }
+
+        setWindowStart(start);
+        setWindowEnd(end);
+        return;
+      }
+    }
+
+    if (keyChanged || becameAvailable) {
+      windowListKeyRef.current = key;
+      if (
+        pendingEarlier24hRef.current &&
+        showEarlier &&
+        pendingEarlier24hRef.current.airport === airport &&
+        pendingEarlier24hRef.current.direction === direction &&
+        n <= pendingEarlier24hRef.current.listLenAtClick &&
+        sortedFlights[0]?.uniqueId === pendingEarlier24hRef.current.firstRowUidAtClick
+      ) {
+        return;
+      }
+
+      const { start, end } = initialListWindow(sortedFlights);
+      setWindowStart(start);
+      setWindowEnd(end);
+      return;
+    }
+
+    const V = FLIGHT_LIST_VISIBLE;
+    const span = windowEnd - windowStart;
+    const needsClamp =
+      windowStart < 0 ||
+      windowEnd > n ||
+      (n >= V && span !== V) ||
+      (n < V && (windowStart !== 0 || windowEnd !== n));
+    if (needsClamp) {
+      const normalized = fixedWindowFromPreferredStart(windowStart, n);
+      setWindowStart(normalized.start);
+      setWindowEnd(normalized.end);
+    }
+  }, [airport, direction, showEarlier, sortedFlights.length, data, listPanelStrip, listPanelSliding]);
+
+  const displayedFlights = useMemo(
+    () => sortedFlights.slice(windowStart, windowEnd),
+    [sortedFlights, windowStart, windowEnd],
+  );
+
+  const mobileListFlights = listPanelStrip ? listPanelStrip.flights : displayedFlights;
+  const mobilePanelVisibleRows = listPanelStrip
+    ? FLIGHT_LIST_VISIBLE
+    : Math.min(FLIGHT_LIST_VISIBLE, sortedFlights.length);
+
+  const canPageEarlier = windowStart > 0;
+  const canLoadEarlierApi = windowStart === 0 && !showEarlier;
+  const canUseLaterNav = windowEnd < sortedFlights.length;
+  /** Knappene vises alltid når lista har rader; de gråes ut når handling ikke er tilgjengelig. */
+  const earlierNavDisabled =
+    listPanelSliding || earlierExpandLoading || (!canPageEarlier && !canLoadEarlierApi);
+  const laterNavDisabled = listPanelSliding || !canUseLaterNav;
   // Under automatisk refresh (interval) skal vi ikke tømme listen.
   // Vis spinner i stedet bare når vi faktisk ikke har noe data enda (første load)
   // eller når bruker har trigget et bevisst "reset" (data=null).
   const showSpinner = loading && !data && !error;
-  /** Pil øverst i listen for å laste inn eldre fly (utvider tidsvindu bakover). */
-  const showEarlierArrow = !showEarlier && data !== null && !loading && !error;
+  const listVisibleCount = Math.min(FLIGHT_LIST_VISIBLE, sortedFlights.length);
+  /** Bla opp med fast vindu (15 rader); steg begrenset av avstand til toppen. */
+  const pageEarlierStep = Math.min(FLIGHT_LIST_PAGE_STEP, windowStart);
+
+  /**
+   * Paging med utvidet radliste: nye rader er allerede rendret i stripen og avdekkes under gliden
+   * (ikke først etter animasjon).
+   */
+  function runMobileListPanelPageSlide(
+    kind: "later" | "earlier",
+    nextWindow: { start: number; end: number },
+    slideRows: number,
+  ) {
+    if (slideRows === 0) return;
+    if (prefersReducedMotion()) {
+      setListPanelTransformArmed(true);
+      setWindowStart(nextWindow.start);
+      setWindowEnd(nextWindow.end);
+      return;
+    }
+    if (listPanelStrip !== null || listPanelSliding) return;
+
+    const rowPx = flightRowHeightPx();
+
+    if (kind === "later") {
+      setListPanelTransformArmed(true);
+      const flights = sortedFlights.slice(windowStart, windowEnd + slideRows);
+      setListPanelStrip({ kind: "later", flights, nextWindow });
+      setListPanelOffsetY(0);
+      setListPanelSliding(true);
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          setListPanelOffsetY(-slideRows * rowPx);
+        });
+      });
+      return;
+    }
+
+    const flights = sortedFlights.slice(nextWindow.start, windowEnd);
+    setListPanelTransformArmed(false);
+    setListPanelStrip({ kind: "earlier", flights, nextWindow });
+    setListPanelOffsetY(-slideRows * rowPx);
+    setListPanelSliding(true);
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        setListPanelTransformArmed(true);
+        requestAnimationFrame(() => {
+          setListPanelOffsetY(0);
+        });
+      });
+    });
+  }
+
+  function onMobileListPanelTransitionEnd(e: TransitionEvent<HTMLDivElement>) {
+    if (e.target !== e.currentTarget) return;
+    if (e.propertyName !== "transform") return;
+    const strip = listPanelStripRef.current;
+    if (!strip) return;
+    setListPanelStrip(null);
+    setListPanelSliding(false);
+    setListPanelTransformArmed(true);
+    setListPanelOffsetY(0);
+    setWindowStart(strip.nextWindow.start);
+    setWindowEnd(strip.nextWindow.end);
+  }
+
+  function handleEarlierPageClick(_ev?: MouseEvent<HTMLButtonElement> | null) {
+    if (earlierExpandLoading || listPanelSliding) return;
+    if (canPageEarlier) {
+      // Krav: alltid "10 rader opp", unntatt når vi er helt på toppen av 24t-lista.
+      // Hvis vi er nær toppen i 1t-lista (< 10 rader), kan vi ikke vise 10 nye uten å hente 24t,
+      // så vi trigger utvidelsen her og lar pendingEarlier24h-logikken reposisjonere med nøyaktig 10.
+      if (!showEarlier && pageEarlierStep < FLIGHT_LIST_PAGE_STEP) {
+        const top = sortedFlights[windowStart];
+        const bottom = windowEnd > windowStart ? sortedFlights[windowEnd - 1] : top;
+        pendingEarlier24hRef.current = {
+          topUid: top?.uniqueId ?? "",
+          bottomUid: bottom?.uniqueId ?? "",
+          visibleCount: listVisibleCount,
+          airport,
+          direction,
+          listLenAtClick: sortedFlights.length,
+          firstRowUidAtClick: sortedFlights[0]?.uniqueId ?? "",
+        };
+        setEarlierExpandLoading(true);
+        setShowEarlier(true);
+        return;
+      }
+
+      const n = sortedFlights.length;
+      const preferred = Math.max(0, windowStart - pageEarlierStep);
+      const w = fixedWindowFromPreferredStart(preferred, n);
+      const shiftedBy = windowStart - w.start;
+      runMobileListPanelPageSlide("earlier", { start: w.start, end: w.end }, shiftedBy);
+      return;
+    }
+    if (canLoadEarlierApi) {
+      const top = sortedFlights[windowStart];
+      const bottom = windowEnd > windowStart ? sortedFlights[windowEnd - 1] : top;
+      pendingEarlier24hRef.current = {
+        topUid: top?.uniqueId ?? "",
+        bottomUid: bottom?.uniqueId ?? "",
+        visibleCount: listVisibleCount,
+        airport,
+        direction,
+        listLenAtClick: sortedFlights.length,
+        firstRowUidAtClick: sortedFlights[0]?.uniqueId ?? "",
+      };
+      setEarlierExpandLoading(true);
+      setShowEarlier(true);
+    }
+  }
+
+  function handleLaterPageClick(_ev?: MouseEvent<HTMLButtonElement> | null) {
+    if (listPanelSliding) return;
+    const n = sortedFlights.length;
+    const slide = Math.min(FLIGHT_LIST_PAGE_STEP, n - windowEnd);
+    if (slide <= 0) return;
+    runMobileListPanelPageSlide(
+      "later",
+      { start: windowStart + slide, end: Math.min(n, windowEnd + slide) },
+      slide,
+    );
+  }
+
+  function isRecentPointerDown(): boolean {
+    return Date.now() - navTapTsRef.current < 650;
+  }
+
+  function onNavTap(cb: () => void) {
+    return {
+      onPointerDown: (e: React.PointerEvent<HTMLButtonElement>) => {
+        navTapTsRef.current = Date.now();
+        cb();
+      },
+      onClick: (e: React.MouseEvent<HTMLButtonElement>) => {
+        // Unngå dobbel firing på pointerdown + click (mus/touch/pen).
+        // Tastaturaktivering gir typisk click uten pointerdown og skal fortsatt virke.
+        if (isRecentPointerDown()) return;
+        cb();
+      },
+    } as const;
+  }
 
   function renderTime(f: Flight) {
     const schedule = fmtTime(f.scheduleTimeUtc);
     const scheduleRelativeDayLabel: string | null = (() => {
       const d = new Date(f.scheduleTimeUtc);
       if (Number.isNaN(d.getTime())) return null;
-      const key = localYmd(d);
+      const key = formatYmdOslo(d);
       if (key === yesterdayKey) return "i går";
       if (key === tomorrowKey) return "i morgen";
       return null;
@@ -367,6 +768,7 @@ export function FlightWidget() {
     const newTime = f.statusTimeUtc ? fmtTime(f.statusTimeUtc) : "";
     const timeChanged = (() => {
       if (!f.statusTimeUtc) return false;
+      if (useOriginalTimeOnlyForSmallUpcomingDeviation(f)) return false;
       // Sammenlign det som faktisk vises (klokkeslett til minutt),
       // så vi ikke stryker over når bare sekunder/mindre avvik endrer seg.
       return schedule !== newTime;
@@ -382,55 +784,73 @@ export function FlightWidget() {
       );
     }
 
+    if (scheduleRelativeDayLabel) {
+      return (
+        <>
+          <span>{newTime}</span>
+          <div className="text-[11px] font-semibold text-zinc-500 leading-tight">{scheduleRelativeDayLabel}</div>
+        </>
+      );
+    }
+
     return (
       <>
         <span className="line-through opacity-70">{schedule}</span>
         <br />
         <span>{newTime}</span>
-        {scheduleRelativeDayLabel ? (
-          <div className="text-[11px] font-semibold text-zinc-500 leading-tight">{scheduleRelativeDayLabel}</div>
-        ) : null}
       </>
     );
   }
 
+  const flightRowHeightStyle = {
+    height: `${FLIGHT_LIST_ROW_HEIGHT_REM}rem`,
+    minHeight: `${FLIGHT_LIST_ROW_HEIGHT_REM}rem`,
+    maxHeight: `${FLIGHT_LIST_ROW_HEIGHT_REM}rem`,
+  };
+
   return (
-    <section className="w-full max-w-5xl rounded-md border border-zinc-200 bg-white shadow-sm">
+    <section className="w-full max-w-5xl overflow-x-hidden rounded-md border border-zinc-200 bg-white shadow-sm">
       <div className="flex flex-col gap-2 border-b border-zinc-200 p-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-            <h2 className="text-base font-semibold tracking-tight text-zinc-950">{airportLabels[airport]}</h2>
-          <p className="text-xs text-zinc-600">
-            Flystatus.
-            {loading ? (
-              <span className="ml-2 text-zinc-500 animate-pulse">Oppdaterer…</span>
+            <h2 className="text-base font-semibold tracking-tight text-zinc-950">
+              {airportLabels[airport] ?? airport}
+            </h2>
+          <p className="text-xs leading-snug text-zinc-600" suppressHydrationWarning>
+            {loading && !data ? (
+              <span className="text-zinc-500 animate-pulse">Oppdaterer…</span>
+            ) : earlierExpandLoading ? (
+              <span className="text-zinc-500 animate-pulse">Henter utvidet liste…</span>
             ) : data?.lastUpdateUtc ? (
-              <span className="ml-2 text-zinc-500">Sist oppdatert: {fmtTime(data.lastUpdateUtc)}</span>
+              <span className="text-zinc-500">Sist oppdatert: {fmtTime(data.lastUpdateUtc)}</span>
             ) : null}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <div
-            className="inline-flex rounded-md bg-zinc-100 p-1 ring-1 ring-zinc-200"
-            role="tablist"
-            aria-label="Avganger og ankomster"
-          >
+          {/* Kontrollpanel: alle knapper i én ramme, fast høyde og stabil alignment */}
+          <div className="inline-flex max-w-full flex-wrap items-center rounded-md bg-zinc-100 p-0.5 ring-1 ring-zinc-200">
             <button
               type="button"
               role="tab"
+              aria-label="Avganger"
               aria-selected={direction === "D"}
               onClick={() => {
                 if (direction !== "D") {
+                  pendingEarlier24hRef.current = null;
+                  setListPanelStrip(null);
+                  setListPanelSliding(false);
+                  setListPanelTransformArmed(true);
+                  setListPanelOffsetY(0);
+                  setEarlierExpandLoading(false);
                   manualFetchRef.current = true;
                   setData(null);
                   setShowEarlier(false);
-                  setShowLaterRows(false);
                   setDirection("D");
                 }
               }}
               className={[
-                "px-3 py-1 text-xs font-semibold rounded-md transition-all duration-200 hover:-translate-y-px hover:shadow-sm active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2",
+                "mx-px my-px inline-flex h-7 w-auto items-center justify-center box-border appearance-none px-[5px] py-0 text-xs font-semibold leading-none rounded-md border border-zinc-200/80 transition-colors duration-150 focus:outline-none",
                 direction === "D"
-                  ? "bg-white shadow-sm text-zinc-950 ring-1 ring-zinc-200"
+                  ? "bg-white text-zinc-950 border-zinc-400 shadow-inner"
                   : "text-zinc-600 hover:bg-white/70 hover:text-zinc-950",
               ].join(" ")}
             >
@@ -439,56 +859,149 @@ export function FlightWidget() {
             <button
               type="button"
               role="tab"
+              aria-label="Ankomster"
               aria-selected={direction === "A"}
               onClick={() => {
                 if (direction !== "A") {
+                  pendingEarlier24hRef.current = null;
+                  setListPanelStrip(null);
+                  setListPanelSliding(false);
+                  setListPanelTransformArmed(true);
+                  setListPanelOffsetY(0);
+                  setEarlierExpandLoading(false);
                   manualFetchRef.current = true;
                   setData(null);
                   setShowEarlier(false);
-                  setShowLaterRows(false);
                   setDirection("A");
                 }
               }}
               className={[
-                "px-3 py-1 text-xs font-semibold rounded-md transition-all duration-200 hover:-translate-y-px hover:shadow-sm active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2",
+                "mx-px my-px inline-flex h-7 w-auto items-center justify-center box-border appearance-none px-[5px] py-0 text-xs font-semibold leading-none rounded-md border border-zinc-200/80 transition-colors duration-150 focus:outline-none",
                 direction === "A"
-                  ? "bg-white shadow-sm text-zinc-950 ring-1 ring-zinc-200"
+                  ? "bg-white text-zinc-950 border-zinc-400 shadow-inner"
                   : "text-zinc-600 hover:bg-white/70 hover:text-zinc-950",
               ].join(" ")}
             >
               Ankomster
             </button>
-          </div>
-          <div
-            className="inline-flex rounded-md bg-zinc-100 p-1 ring-1 ring-zinc-200"
-            role="tablist"
-            aria-label="Flyplass"
-          >
-            {(["SVG", "BGO", "OSL", "TRD"] as AirportCode[]).map((code) => (
-              <button
-                key={code}
-                type="button"
-                role="tab"
-                aria-selected={airport === code}
-                onClick={() => {
-                  if (airport !== code) {
-                    manualFetchRef.current = true;
-                    setData(null);
-                    setShowEarlier(false);
-                    setShowLaterRows(false);
-                    setAirport(code);
-                  }
-                }}
-                className={[
-                  "px-3 py-1 text-xs font-semibold rounded-md transition-all duration-200 hover:-translate-y-px hover:shadow-sm active:scale-[0.97] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2",
-                  airport === code
-                    ? "bg-white shadow-sm text-zinc-950 ring-1 ring-zinc-200"
-                    : "text-zinc-600 hover:bg-white/70 hover:text-zinc-950",
-                ].join(" ")}
-              >
-                {code}
-              </button>
-            ))}
+
+            <div className="mx-1 h-5 w-px bg-zinc-300/70" aria-hidden="true" />
+
+            <div ref={airportMenuWrapRef} className="inline-flex flex-wrap items-center">
+              {(["SVG", "BGO", "OSL"] as AirportCode[]).map((code) => (
+                <button
+                  key={code}
+                  type="button"
+                  role="tab"
+                  aria-label={`Flyplass ${code}`}
+                  aria-selected={airport === code}
+                  onClick={() => {
+                    if (airport !== code) {
+                      pendingEarlier24hRef.current = null;
+                      setListPanelStrip(null);
+                      setListPanelSliding(false);
+                      setListPanelTransformArmed(true);
+                      setListPanelOffsetY(0);
+                      setEarlierExpandLoading(false);
+                      manualFetchRef.current = true;
+                      setData(null);
+                      setShowEarlier(false);
+                      setAirport(code);
+                    }
+                  }}
+                  className={[
+                    "mx-px my-px inline-flex h-7 w-auto items-center justify-center box-border appearance-none px-1.5 py-0 text-xs font-semibold leading-none rounded-md border border-zinc-200/80 transition-colors duration-150 focus:outline-none",
+                    airport === code
+                      ? "bg-white text-zinc-950 border-zinc-400 shadow-inner"
+                      : "text-zinc-600 hover:bg-white/70 hover:text-zinc-950",
+                  ].join(" ")}
+                >
+                  {code}
+                </button>
+              ))}
+
+              <div className="relative">
+                <button
+                  ref={airportMenuButtonRef}
+                  type="button"
+                  aria-haspopup="listbox"
+                  aria-expanded={airportMenuOpen}
+                  aria-label="Velg flyplass"
+                  onClick={() => setAirportMenuOpen((x) => !x)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") setAirportMenuOpen(false);
+                  }}
+                  className={[
+                    "mx-px my-px inline-flex h-7 w-7 items-center justify-center box-border appearance-none p-0 text-zinc-700 rounded-md border border-zinc-200/80 transition-colors duration-150 focus:outline-none",
+                    airportMenuOpen
+                      ? "bg-white text-zinc-950 border-zinc-400 shadow-inner"
+                      : "text-zinc-600 hover:bg-white/70 hover:text-zinc-950",
+                  ].join(" ")}
+                >
+                  <svg
+                    className="block"
+                    style={{ width: 12, height: 12 }}
+                    viewBox="0 0 24 24"
+                    fill="currentColor"
+                    aria-hidden="true"
+                  >
+                    <circle cx="12" cy="5" r="1.8" />
+                    <circle cx="12" cy="12" r="1.8" />
+                    <circle cx="12" cy="19" r="1.8" />
+                  </svg>
+                </button>
+
+                {airportMenuOpen ? (
+                  <div
+                    ref={airportMenuRef}
+                    role="listbox"
+                    aria-label="Alle norske flyplasser"
+                    className="fixed z-50 overflow-hidden rounded-md border border-zinc-200 bg-white shadow-lg"
+                    style={
+                      airportMenuPos
+                        ? { top: airportMenuPos.top, left: airportMenuPos.left, width: airportMenuPos.width }
+                        : undefined
+                    }
+                  >
+                    <div className="max-h-80 overflow-y-auto p-1">
+                      {NORWEGIAN_AIRPORTS.map((a) => {
+                        const selected = airport === a.code;
+                        return (
+                          <button
+                            key={a.code}
+                            type="button"
+                            role="option"
+                            aria-selected={selected}
+                            onClick={() => {
+                              if (airport !== a.code) {
+                                pendingEarlier24hRef.current = null;
+                                setListPanelStrip(null);
+                                setListPanelSliding(false);
+                                setListPanelTransformArmed(true);
+                                setListPanelOffsetY(0);
+                                setEarlierExpandLoading(false);
+                                manualFetchRef.current = true;
+                                setData(null);
+                                setShowEarlier(false);
+                                setAirport(a.code);
+                              }
+                              setAirportMenuOpen(false);
+                            }}
+                            className={[
+                              "flex w-full items-center justify-between gap-2 rounded-md px-2.5 py-2 text-left text-xs font-semibold",
+                              selected ? "bg-sky-50 text-sky-900" : "text-zinc-700 hover:bg-zinc-50",
+                            ].join(" ")}
+                          >
+                            <span className="min-w-0 whitespace-normal break-words leading-snug">{a.name}</span>
+                            <span className="shrink-0 text-[11px] text-zinc-500">{a.code}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -539,35 +1052,58 @@ export function FlightWidget() {
             </div>
           ) : (
             <>
-              {showEarlierArrow ? (
+              {sortedFlights.length > 0 ? (
                 <div className="-mx-4 border-b border-zinc-100 bg-zinc-50/50 py-0">
                   <button
                     type="button"
+                    aria-busy={earlierExpandLoading}
+                    disabled={earlierNavDisabled}
                     aria-label={
-                      direction === "D" ? "Last inn tidligere avganger" : "Last inn tidligere ankomster"
+                      earlierExpandLoading
+                        ? "Laster utvidet liste"
+                        : earlierNavDisabled
+                          ? direction === "D"
+                            ? "Ingen flere tidligere avganger å vise"
+                            : "Ingen flere tidligere ankomster å vise"
+                          : canPageEarlier
+                            ? `Vis ${pageEarlierStep} tidligere fly`
+                            : direction === "D"
+                              ? "Last inn tidligere avganger"
+                              : "Last inn tidligere ankomster"
                     }
-                    title={direction === "D" ? "Vis tidligere avganger" : "Vis tidligere ankomster"}
-                    onClick={() => {
-                      manualFetchRef.current = true;
-                      setData(null);
-                      setShowEarlier(true);
-                      setShowLaterRows(false);
-                    }}
-                    className="flex h-5 w-full items-center justify-center gap-1.5 rounded-none border-0 bg-transparent py-0 text-zinc-400 transition-colors hover:bg-zinc-100/80 hover:text-zinc-600 active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-inset"
+                    {...onNavTap(() => handleEarlierPageClick(null))}
+                    className={LIST_SCROLL_NAV_BUTTON_CLASS}
                   >
-                    <svg
-                      className="h-3 w-3 shrink-0"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      aria-hidden="true"
-                    >
-                      <path d="M18 15l-6-6-6 6" />
-                    </svg>
-                    <span className="text-[10px] font-medium leading-none">tidligere</span>
+                    {earlierExpandLoading ? (
+                      <svg
+                        className="h-3.5 w-3.5 shrink-0 animate-spin text-zinc-500"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                      </svg>
+                    ) : (
+                      <svg
+                        className="h-3.5 w-3.5 shrink-0"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M18 15l-6-6-6 6" />
+                      </svg>
+                    )}
+                    <span className="text-xs font-semibold leading-none">
+                      {earlierExpandLoading ? "laster…" : "tidligere fly"}
+                    </span>
                   </button>
                 </div>
               ) : null}
@@ -576,8 +1112,28 @@ export function FlightWidget() {
                   Ingen fly i dette tidsrommet.
                 </div>
               ) : (
-                displayedFlights.map((f, idx) => {
-              const status = effectiveStatus(f);
+                <div
+                  className="overflow-hidden"
+                  style={{
+                    height: `${mobilePanelVisibleRows * FLIGHT_LIST_ROW_HEIGHT_REM}rem`,
+                  }}
+                >
+                  <div
+                    className="flex flex-col"
+                    ref={mobileListPanelRef}
+                    onTransitionEnd={onMobileListPanelTransitionEnd}
+                    style={{
+                      transform: `translate3d(0, ${listPanelOffsetY}px, 0)`,
+                      transition:
+                        listPanelSliding && listPanelTransformArmed
+                          ? `transform ${FLIGHT_LIST_PANEL_SLIDE_MS}ms ${FLIGHT_LIST_PANEL_SLIDE_EASING}`
+                          : "none",
+                      willChange:
+                        listPanelSliding && listPanelTransformArmed ? "transform" : undefined,
+                    }}
+                  >
+                {mobileListFlights.map((f) => {
+              const status = effectiveStatus(f, clientNowMs);
               const mobileStatusLabel = status.label;
               const isCancelled = status.code === "C";
 
@@ -595,20 +1151,28 @@ export function FlightWidget() {
               return (
                 <div
                   key={f.uniqueId}
-                  className={`grid grid-cols-[70px_1fr_auto] items-start gap-x-3 border-b border-zinc-200 px-3 py-2 ${
+                  style={{
+                    ...flightRowHeightStyle,
+                    gridTemplateColumns: `${FLIGHT_LIST_TIME_COL} minmax(0, 1fr) auto`,
+                  }}
+                  className={`grid shrink-0 items-center gap-x-1.5 overflow-hidden border-b border-zinc-200 box-border px-2.5 py-0.5 ${
                     updatedUids.has(f.uniqueId) ? "updated-row" : ""
-                  } ${
-                    showLaterRows && idx >= maxLines ? "reveal-row" : ""
                   } ${isCancelled ? "text-red-700" : ""}`}
                 >
-                  <div className={`text-sm font-semibold leading-tight ${isCancelled ? "text-red-700" : "text-zinc-950"}`}>
+                  <div
+                    className={`line-clamp-2 min-h-0 min-w-0 overflow-hidden text-sm font-semibold tabular-nums leading-tight ${
+                      isCancelled ? "text-red-700" : "text-zinc-950"
+                    }`}
+                  >
                     {renderTime(f)}
                   </div>
-                  <div className="min-w-0">
-                    <div className={`text-sm font-semibold leading-tight ${isCancelled ? "text-red-700" : "text-zinc-950"}`}>
+                  <div className="flex min-h-0 min-w-0 flex-col justify-center gap-px overflow-hidden self-stretch">
+                    <div
+                      className={`truncate text-sm font-semibold leading-tight ${isCancelled ? "text-red-700" : "text-zinc-950"}`}
+                    >
                       {placeName}
                     </div>
-                    <div className={`mt-0.5 truncate text-[11px] font-semibold ${isCancelled ? "text-red-700" : "text-zinc-700"}`}>
+                    <div className={`truncate text-[11px] font-semibold leading-tight ${isCancelled ? "text-red-700" : "text-zinc-700"}`}>
                       {f.flightId}
                       <span className="mx-2 text-zinc-400">|</span>
                       {airlineName}
@@ -621,12 +1185,12 @@ export function FlightWidget() {
                     </div>
                   </div>
 
-                <div className="flex flex-col items-end">
+                <div className="flex h-full min-h-0 items-center justify-end">
                   {mobileStatusLabel !== "Scheduled" ? (
                     <span
                       className={[
-                        "inline-flex items-center rounded-md px-2 py-0.5 text-[11px] font-semibold ring-1 ring-inset whitespace-nowrap",
-                        statusClass(status.code),
+                        "inline-flex max-h-8 shrink-0 items-center rounded-md px-2.5 py-1 text-xs font-semibold ring-1 ring-inset whitespace-nowrap leading-snug",
+                        statusClass(status),
                       ].join(" ")}
                       title={
                         f.statusTimeUtc && f.statusTimeUtc !== f.scheduleTimeUtc
@@ -640,21 +1204,28 @@ export function FlightWidget() {
                 </div>
                 </div>
               );
-                })
+                })}
+                  </div>
+                </div>
               )}
             </>
           )}
 
-          {showLaterButton ? (
+          {sortedFlights.length > 0 ? (
             <div className="-mx-4 border-t border-zinc-100 bg-zinc-50/50 py-0">
               <button
                 type="button"
-                aria-label={`Vis ${sortedFlights.length - maxLines} flere fly i listen (senere)`}
-                onClick={() => setShowLaterRows(true)}
-                className="flex h-5 w-full items-center justify-center gap-1.5 rounded-none border-0 bg-transparent py-0 text-zinc-400 transition-colors hover:bg-zinc-100/80 hover:text-zinc-600 active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-inset"
+                aria-label={
+                  laterNavDisabled
+                    ? "Ingen flere senere fly å vise"
+                    : `Vis ${Math.min(FLIGHT_LIST_PAGE_STEP, sortedFlights.length - windowEnd)} senere fly`
+                }
+                disabled={laterNavDisabled}
+                {...onNavTap(() => handleLaterPageClick(null))}
+                className={LIST_SCROLL_NAV_BUTTON_CLASS}
               >
                 <svg
-                  className="h-3 w-3 shrink-0"
+                  className="h-3.5 w-3.5 shrink-0"
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"
@@ -665,7 +1236,7 @@ export function FlightWidget() {
                 >
                   <path d="M6 9l6 6 6-6" />
                 </svg>
-                <span className="text-[10px] font-medium leading-none">senere</span>
+                <span className="text-xs font-semibold leading-none">senere fly</span>
               </button>
             </div>
           ) : null}
@@ -676,18 +1247,18 @@ export function FlightWidget() {
           <table className="min-w-[900px] w-full text-left text-sm">
             <thead className="text-xs uppercase tracking-wide text-zinc-500">
               <tr className="border-b border-zinc-200">
-                <th className="py-3 pr-4">Tid</th>
-                <th className="py-3 pr-4">{direction === "D" ? "Til" : "Fra"}</th>
-                <th className="py-3 pr-4">Fly</th>
-                <th className="py-3 pr-4">Status</th>
-                <th className="py-3 pr-4">Gate</th>
-                <th className="py-3 pr-4">Bånd</th>
+                <th className="w-[3.25rem] max-w-[3.25rem] py-1.5 pr-2 whitespace-nowrap">Tid</th>
+                <th className="py-1.5 pr-4">{direction === "D" ? "Til" : "Fra"}</th>
+                <th className="py-1.5 pr-4">Fly</th>
+                <th className="py-1.5 pr-4">Status</th>
+                <th className="py-1.5 pr-4">Gate</th>
+                <th className="py-1.5 pr-4">Bånd</th>
               </tr>
             </thead>
             <tbody className="text-zinc-950">
               {showSpinner ? (
                 <tr>
-                  <td colSpan={6} className="py-6 text-zinc-600">
+                  <td colSpan={6} className="py-4 text-zinc-600">
                     <span className="inline-flex items-center gap-2">
                       <svg
                         className="h-4 w-4 animate-spin text-zinc-600"
@@ -707,13 +1278,13 @@ export function FlightWidget() {
                 </tr>
               ) : sortedFlights.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="py-6 text-zinc-600">
+                  <td colSpan={6} className="py-4 text-zinc-600">
                     Ingen fly i dette tidsrommet.
                   </td>
                 </tr>
               ) : (
                 displayedFlights.map((f) => {
-                  const status = effectiveStatus(f);
+                  const status = effectiveStatus(f, clientNowMs);
                   const isCancelled = status.code === "C";
                   return (
                     <tr
@@ -722,27 +1293,63 @@ export function FlightWidget() {
                         isCancelled ? "text-red-700" : ""
                       }`}
                     >
-                      <td className="py-3 pr-4 font-medium">{renderTime(f)}</td>
-                      <td className="py-3 pr-4">{f.airportName ?? f.airport}</td>
-                      <td className="py-3 pr-4">
-                        {f.flightId}
-                        <span className="mx-2 text-zinc-400">|</span>
-                        {f.airlineName ?? f.airline}
+                      <td
+                        style={flightRowHeightStyle}
+                        className="box-border w-[3.25rem] max-w-[3.25rem] overflow-hidden align-middle py-0.5 pr-2"
+                      >
+                        <div
+                          className={`line-clamp-2 text-sm font-medium tabular-nums leading-tight ${isCancelled ? "text-red-700" : "text-zinc-950"}`}
+                        >
+                          {renderTime(f)}
+                        </div>
                       </td>
-                      <td className="py-3 pr-4">
+                      <td
+                        style={flightRowHeightStyle}
+                        className="box-border overflow-hidden align-middle py-0.5 pr-4"
+                      >
+                        <div className={`truncate text-sm leading-tight ${isCancelled ? "text-red-700" : ""}`}>
+                          {f.airportName ?? f.airport}
+                        </div>
+                      </td>
+                      <td
+                        style={flightRowHeightStyle}
+                        className="box-border overflow-hidden align-middle py-0.5 pr-4"
+                      >
+                        <div className="truncate text-sm leading-tight">
+                          {f.flightId}
+                          <span className="mx-2 text-zinc-400">|</span>
+                          {f.airlineName ?? f.airline}
+                        </div>
+                      </td>
+                      <td
+                        style={flightRowHeightStyle}
+                        className="box-border overflow-hidden align-middle py-0.5 pr-4"
+                      >
                         {status.label !== "Scheduled" ? (
                           <span
                             className={[
-                              "inline-flex items-center rounded-md px-2 py-1 text-xs font-semibold ring-1 ring-inset",
-                              statusClass(status.code),
+                              "inline-flex max-h-8 items-center rounded-md px-2.5 py-1 text-xs font-semibold ring-1 ring-inset leading-snug",
+                              statusClass(status),
                             ].join(" ")}
                           >
                             {status.label}
                           </span>
                         ) : null}
                       </td>
-                      <td className="py-3 pr-4 text-zinc-700">{f.gate && f.gate !== "—" ? f.gate : ""}</td>
-                      <td className="py-3 pr-4 text-zinc-700">{f.beltNumber && f.beltNumber !== "—" ? f.beltNumber : ""}</td>
+                      <td
+                        style={flightRowHeightStyle}
+                        className="box-border overflow-hidden align-middle py-0.5 pr-4"
+                      >
+                        <div className="truncate text-sm text-zinc-700 leading-tight">{f.gate && f.gate !== "—" ? f.gate : ""}</div>
+                      </td>
+                      <td
+                        style={flightRowHeightStyle}
+                        className="box-border overflow-hidden align-middle py-0.5 pr-4"
+                      >
+                        <div className="truncate text-sm text-zinc-700 leading-tight">
+                          {f.beltNumber && f.beltNumber !== "—" ? f.beltNumber : ""}
+                        </div>
+                      </td>
                     </tr>
                   );
                 })
@@ -750,16 +1357,21 @@ export function FlightWidget() {
             </tbody>
           </table>
 
-          {showLaterButton ? (
+          {sortedFlights.length > 0 ? (
             <div className="-mx-4 border-t border-zinc-100 bg-zinc-50/50 py-0">
               <button
                 type="button"
-                aria-label={`Vis ${sortedFlights.length - maxLines} flere fly i listen (senere)`}
-                onClick={() => setShowLaterRows(true)}
-                className="flex h-5 w-full items-center justify-center gap-1.5 rounded-none border-0 bg-transparent py-0 text-zinc-400 transition-colors hover:bg-zinc-100/80 hover:text-zinc-600 active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-inset"
+                aria-label={
+                  laterNavDisabled
+                    ? "Ingen flere senere fly å vise"
+                    : `Vis ${Math.min(FLIGHT_LIST_PAGE_STEP, sortedFlights.length - windowEnd)} senere fly`
+                }
+                disabled={laterNavDisabled}
+                onClick={handleLaterPageClick}
+                className={LIST_SCROLL_NAV_BUTTON_CLASS}
               >
                 <svg
-                  className="h-3 w-3 shrink-0"
+                  className="h-3.5 w-3.5 shrink-0"
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"
@@ -770,18 +1382,22 @@ export function FlightWidget() {
                 >
                   <path d="M6 9l6 6 6-6" />
                 </svg>
-                <span className="text-[10px] font-medium leading-none">senere</span>
+                <span className="text-xs font-semibold leading-none">senere fly</span>
               </button>
             </div>
           ) : null}
         </div>
 
         <div className="mt-3 text-[11px] text-zinc-500">
-          Data:{" "}
+          
+          ©{" "}
+          <a className="underline hover:text-zinc-700" href="https://www.aftenbladet.no" target="_blank" rel="noreferrer">
+            Aftenbladet.no
+          </a> 
+          {"/MS | "}Data:{" "}
           <a className="underline hover:text-zinc-700" href="https://www.avinor.no" target="_blank" rel="noreferrer">
             Avinor
           </a>
-          .
         </div>
       </div>
     </section>
